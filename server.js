@@ -58,3 +58,64 @@ app.get("/diag/whoami", async (_req, res) => {
 });
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`✅ Backend on http://localhost:${PORT}`));
+// --- AI endpoints for the dashboard ---
+import OpenAI from "openai";
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+// Generate audience suggestions
+app.post("/api/ai/audience", async (req, res) => {
+  try {
+    const { product } = req.body;
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        { role: "system", content: "You are Marom’s Facebook Ads strategist." },
+        { role: "user", content: `Suggest 3 ideal Facebook target audiences for ${product}. Include age, gender, interests, and reason why they fit.` },
+      ],
+    });
+    res.json({ suggestions: completion.choices[0].message.content });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Generate ad copy / creatives
+app.post("/api/ai/creatives", async (req, res) => {
+  try {
+    const { product, tone } = req.body;
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        { role: "system", content: "You are a creative copywriter for Marom natural cosmetics." },
+        { role: "user", content: `Write 3 short Facebook ad texts in ${tone || "English"} for ${product}. Make them natural, emotional, and add a call-to-action.` },
+      ],
+    });
+    res.json({ copy: completion.choices[0].message.content });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Campaign improvement suggestions
+app.get("/api/ai/recommendations", async (req, res) => {
+  try {
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        { role: "system", content: "You are a Facebook Ads performance expert for Marom." },
+        { role: "user", content: "Suggest 3 actions to improve campaign performance for natural cosmetics (based on spend, CTR, CPM)." },
+      ],
+    });
+    res.json({ recommendations: completion.choices[0].message.content });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Mock actions
+app.post("/api/ai/recommendations/:type/apply", (req, res) => {
+  res.json({ ok: true, message: `Applied recommendation: ${req.params.type}` });
+});
+app.post("/api/ai/recommendations/:type/dismiss", (req, res) => {
+  res.json({ ok: true, message: `Dismissed recommendation: ${req.params.type}` });
+});
