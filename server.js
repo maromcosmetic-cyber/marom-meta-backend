@@ -89,7 +89,7 @@ function saveConversation(userMessage, aiResponse) {
 
 // Build system prompt with company context
 function buildSystemPrompt(companyContext) {
-  let prompt = `You are an AI assistant helping with ${companyContext.name}'s Facebook and Instagram ad campaigns. `;
+  let prompt = `You are an AI assistant helping with ${companyContext.name}'s Facebook and Instagram ad campaigns through the MAROM Ads Copilot dashboard. `;
   
   if (companyContext.industry) {
     prompt += `The company operates in the ${companyContext.industry} industry. `;
@@ -115,7 +115,12 @@ function buildSystemPrompt(companyContext) {
     prompt += `Additional context: ${companyContext.notes}. `;
   }
   
-  prompt += `Use this information to provide personalized recommendations. Be helpful, concise, and professional. Remember past conversations and preferences to provide better suggestions over time.`;
+  prompt += `\n\nIMPORTANT CONTEXT:\n`;
+  prompt += `- You are helping users navigate the MAROM Ads Copilot dashboard, NOT Facebook/Instagram directly.\n`;
+  prompt += `- When users ask about "company profile" or "company settings", they mean the Company Profile tab in this dashboard where they can save company information for AI personalization.\n`;
+  prompt += `- You can help with: campaign creation, audience targeting, creative generation, performance monitoring, and optimization recommendations.\n`;
+  prompt += `- All features are accessed through the dashboard interface, not by logging into Facebook/Instagram directly.\n`;
+  prompt += `- Use this information to provide personalized recommendations. Be helpful, concise, and professional. Remember past conversations and preferences to provide better suggestions over time.`;
   
   return prompt;
 }
@@ -349,7 +354,7 @@ app.post("/api/ai/chat", async (req, res) => {
     const messages = [
       {
         role: "system",
-        content: systemPrompt + " Remember past conversations and use company context to provide personalized, relevant advice."
+        content: systemPrompt + " Remember past conversations and use company context to provide personalized, relevant advice. When users mention 'company profile', they're referring to the Company Profile tab in this dashboard where they can save company information for AI personalization - NOT Facebook or Instagram profile settings."
       }
     ];
     
