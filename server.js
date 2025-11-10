@@ -112,6 +112,45 @@ app.get("/api/ai/recommendations", async (req, res) => {
   }
 });
 
+// Chat endpoint
+app.post("/api/ai/chat", async (req, res) => {
+  try {
+    const { message, history = [] } = req.body;
+    
+    if (!message) {
+      return res.status(400).json({ error: "Message is required" });
+    }
+
+    // Build messages array for OpenAI
+    const messages = [
+      {
+        role: "system",
+        content: "You are an AI assistant helping with MAROM's Facebook and Instagram ad campaigns. You can help with campaign creation, audience targeting, creative ideas, optimization strategies, and general advertising advice. Be helpful, concise, and professional."
+      },
+      // Add conversation history
+      ...history.map(msg => ({
+        role: msg.role === "user" ? "user" : "assistant",
+        content: msg.content
+      })),
+      // Add current message
+      { role: "user", content: message }
+    ];
+
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: messages,
+      temperature: 0.7,
+      max_tokens: 500
+    });
+
+    const aiResponse = completion.choices[0].message.content;
+    res.json({ message: aiResponse });
+  } catch (err) {
+    console.error("Chat error:", err);
+    res.status(500).json({ error: err.message || "Failed to generate response" });
+  }
+});
+
 // Mock actions
 app.post("/api/ai/recommendations/:type/apply", (req, res) => {
   res.json({ ok: true, message: `Applied recommendation: ${req.params.type}` });
