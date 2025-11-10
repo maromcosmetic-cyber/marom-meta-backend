@@ -58,9 +58,3 @@ app.get("/diag/whoami", async (_req, res) => {
 });
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`✅ Backend on http://localhost:${PORT}`));
-app.get("/diag/openai", (req, res) => {
-  res.json({
-    ok: !!process.env.OPENAI_API_KEY,
-    keyLength: process.env.OPENAI_API_KEY?.length
-  });
-});
