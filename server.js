@@ -38,5 +38,23 @@ app.get("/api/adaccounts/:actId/insights", async (req,res) => {
   catch(e){ res.status(500).json(e.response?.data || { error:String(e) }); }
 });
 
+// --- Diagnostic routes ---
+app.get("/diag/permissions", async (_req, res) => {
+  try {
+    const j = await fb(`/me/permissions`, "GET");
+    res.json(j);
+  } catch (e) {
+    res.status(500).json(e.response?.data || { error: String(e) });
+  }
+});
+
+app.get("/diag/whoami", async (_req, res) => {
+  try {
+    const j = await fb(`/me`, "GET", { fields: "id,name,adaccounts.limit(5){id,name}" });
+    res.json(j);
+  } catch (e) {
+    res.status(500).json(e.response?.data || { error: String(e) });
+  }
+});
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`✅ Backend on http://localhost:${PORT}`));
