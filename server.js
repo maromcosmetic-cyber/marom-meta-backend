@@ -210,7 +210,27 @@ app.post("/api/ai/audience", async (req, res) => {
     });
     
     const response = JSON.parse(completion.choices[0].message.content);
-    res.json({ suggestions: response.suggestions || [response] });
+    
+    // Ensure suggestions is always an array
+    let suggestions = [];
+    if (response.suggestions && Array.isArray(response.suggestions)) {
+      suggestions = response.suggestions;
+    } else if (Array.isArray(response)) {
+      suggestions = response;
+    } else if (response.suggestions && typeof response.suggestions === 'string') {
+      // If it's a string, try to parse it or create a single suggestion
+      try {
+        const parsed = JSON.parse(response.suggestions);
+        suggestions = Array.isArray(parsed) ? parsed : [parsed];
+      } catch {
+        suggestions = [{ title: "Suggested Audience", demographics: response.suggestions }];
+      }
+    } else {
+      // Fallback: create a single suggestion from the response
+      suggestions = [response];
+    }
+    
+    res.json({ suggestions });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -235,7 +255,27 @@ app.post("/api/ai/creatives", async (req, res) => {
     });
     
     const response = JSON.parse(completion.choices[0].message.content);
-    res.json({ variants: response.variants || [response] });
+    
+    // Ensure variants is always an array
+    let variants = [];
+    if (response.variants && Array.isArray(response.variants)) {
+      variants = response.variants;
+    } else if (Array.isArray(response)) {
+      variants = response;
+    } else if (response.variants && typeof response.variants === 'string') {
+      // If it's a string, try to parse it or create a single variant
+      try {
+        const parsed = JSON.parse(response.variants);
+        variants = Array.isArray(parsed) ? parsed : [parsed];
+      } catch {
+        variants = [{ name: "Ad Variant", text: response.variants }];
+      }
+    } else {
+      // Fallback: create a single variant from the response
+      variants = [response];
+    }
+    
+    res.json({ variants });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -265,7 +305,27 @@ app.get("/api/ai/recommendations", async (req, res) => {
     });
     
     const response = JSON.parse(completion.choices[0].message.content);
-    res.json({ recommendations: response.recommendations || [response] });
+    
+    // Ensure recommendations is always an array
+    let recommendations = [];
+    if (response.recommendations && Array.isArray(response.recommendations)) {
+      recommendations = response.recommendations;
+    } else if (Array.isArray(response)) {
+      recommendations = response;
+    } else if (response.recommendations && typeof response.recommendations === 'string') {
+      // If it's a string, try to parse it or create a single recommendation
+      try {
+        const parsed = JSON.parse(response.recommendations);
+        recommendations = Array.isArray(parsed) ? parsed : [parsed];
+      } catch {
+        recommendations = [{ title: "Recommendation", recommendation: response.recommendations }];
+      }
+    } else {
+      // Fallback: create a single recommendation from the response
+      recommendations = [response];
+    }
+    
+    res.json({ recommendations });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
