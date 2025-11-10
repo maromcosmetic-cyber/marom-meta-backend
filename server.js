@@ -291,6 +291,43 @@ app.get("/api/ai/recommendations", async (req, res) => {
   try {
     const companyContext = loadCompanyContext();
     const conversations = loadConversations();
+    
+    // Try to fetch actual campaigns from Facebook API
+    let hasCampaigns = false;
+    let campaignData = null;
+    
+    try {
+      // Check if we can access ad accounts (indicates campaigns might exist)
+      const accountsResponse = await fb(`/me/adaccounts`, "GET", { 
+        fields: "id,account_id,name",
+        limit: 1 
+      });
+      
+      if (accountsResponse.data && accountsResponse.data.length > 0) {
+        const account = accountsResponse.data[0];
+        // Try to get campaigns for this account
+        try {
+          const campaignsResponse = await fb(`/${account.id}/campaigns`, "GET", {
+            fields: "id,name,status",
+            limit: 1
+          });
+          if (campaignsResponse.data && campaignsResponse.data.length > 0) {
+            hasCampaigns = true;
+            campaignData = {
+              accountName: account.name,
+              campaignCount: campaignsResponse.data.length
+            };
+          }
+        } catch (e) {
+          // No campaigns or can't access
+          hasCampaigns = false;
+        }
+      }
+    } catch (e) {
+      // Can't access Facebook API or no accounts
+      hasCampaigns = false;
+    }
+    
     const systemPrompt = buildSystemPrompt(companyContext);
     
     // Include recent conversation insights
@@ -300,11 +337,21 @@ app.get("/api/ai/recommendations", async (req, res) => {
       conversationContext = `Recent conversation insights: ${recent.map(c => `User: ${c.user.substring(0, 100)}... Assistant: ${c.assistant.substring(0, 100)}...`).join(" ")}`;
     }
     
+    let userPrompt = "";
+    if (hasCampaigns) {
+      userPrompt = `Based on ${companyContext.name}'s context and existing campaign data, suggest 5 actionable recommendations to improve ad campaigns. ${conversationContext}`;
+    } else {
+      userPrompt = `The user doesn't have any active campaigns yet. Based on ${companyContext.name}'s context (${companyContext.industry || 'their industry'}), provide 5 helpful "Getting Started" recommendations for creating their first Facebook/Instagram ad campaigns. Focus on best practices, setup tips, and initial strategy. ${conversationContext}`;
+    }
+    
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
-        { role: "system", content: systemPrompt + " You are a Facebook Ads performance expert. Analyze campaign data and provide actionable recommendations. Format as JSON with recommendations array, each containing title, campaign, issue, performance, recommendation, and type fields." },
-        { role: "user", content: `Based on ${companyContext.name}'s context and campaign performance data, suggest 5 actionable recommendations to improve ad campaigns. ${conversationContext}` },
+        { 
+          role: "system", 
+          content: systemPrompt + ` You are a Facebook Ads performance expert. ${hasCampaigns ? 'Analyze campaign data and provide actionable recommendations.' : 'Provide helpful getting-started guidance for users who haven\'t created campaigns yet.'} Format as JSON with recommendations array, each containing title, campaign (or "Getting Started" if no campaigns), issue (or "Setup" if no campaigns), performance (or "Best Practice" if no campaigns), recommendation, and type fields.` 
+        },
+        { role: "user", content: userPrompt },
       ],
       response_format: { type: "json_object" }
     });
@@ -318,7 +365,6 @@ app.get("/api/ai/recommendations", async (req, res) => {
     } else if (Array.isArray(response)) {
       recommendations = response;
     } else if (response.recommendations && typeof response.recommendations === 'string') {
-      // If it's a string, try to parse it or create a single recommendation
       try {
         const parsed = JSON.parse(response.recommendations);
         recommendations = Array.isArray(parsed) ? parsed : [parsed];
@@ -326,11 +372,16 @@ app.get("/api/ai/recommendations", async (req, res) => {
         recommendations = [{ title: "Recommendation", recommendation: response.recommendations }];
       }
     } else {
-      // Fallback: create a single recommendation from the response
       recommendations = [response];
     }
     
-    res.json({ recommendations });
+    // Add metadata about data source
+    res.json({ 
+      recommendations,
+      hasCampaigns,
+      basedOn: hasCampaigns ? 'existing campaigns' : 'company context and best practices',
+      message: hasCampaigns ? 'Recommendations based on your active campaigns' : 'Getting started recommendations - create campaigns to get performance-based suggestions'
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
