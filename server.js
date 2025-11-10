@@ -2,7 +2,123 @@ import express from "express";
 import axios from "axios";
 import dotenv from "dotenv";
 import cors from "cors";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+import OpenAI from "openai";
 dotenv.config();
+
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Memory storage paths
+const MEMORY_DIR = path.join(__dirname, "memory");
+const COMPANY_FILE = path.join(MEMORY_DIR, "company.json");
+const CONVERSATIONS_FILE = path.join(MEMORY_DIR, "conversations.json");
+
+// Ensure memory directory exists
+if (!fs.existsSync(MEMORY_DIR)) {
+  fs.mkdirSync(MEMORY_DIR, { recursive: true });
+}
+
+// Load company context
+function loadCompanyContext() {
+  try {
+    if (fs.existsSync(COMPANY_FILE)) {
+      return JSON.parse(fs.readFileSync(COMPANY_FILE, "utf8"));
+    }
+  } catch (err) {
+    console.error("Error loading company context:", err);
+  }
+  return {
+    name: "MAROM",
+    industry: "Natural Hair Care & Cosmetics",
+    products: [],
+    targetAudience: "",
+    brandValues: "",
+    campaignGoals: "",
+    pastCampaigns: [],
+    preferences: {},
+    notes: ""
+  };
+}
+
+// Save company context
+function saveCompanyContext(context) {
+  try {
+    fs.writeFileSync(COMPANY_FILE, JSON.stringify(context, null, 2), "utf8");
+    return true;
+  } catch (err) {
+    console.error("Error saving company context:", err);
+    return false;
+  }
+}
+
+// Load conversation history
+function loadConversations() {
+  try {
+    if (fs.existsSync(CONVERSATIONS_FILE)) {
+      return JSON.parse(fs.readFileSync(CONVERSATIONS_FILE, "utf8"));
+    }
+  } catch (err) {
+    console.error("Error loading conversations:", err);
+  }
+  return [];
+}
+
+// Save conversation history
+function saveConversation(userMessage, aiResponse) {
+  try {
+    const conversations = loadConversations();
+    conversations.push({
+      timestamp: new Date().toISOString(),
+      user: userMessage,
+      assistant: aiResponse
+    });
+    // Keep last 100 conversations
+    const recent = conversations.slice(-100);
+    fs.writeFileSync(CONVERSATIONS_FILE, JSON.stringify(recent, null, 2), "utf8");
+    return true;
+  } catch (err) {
+    console.error("Error saving conversation:", err);
+    return false;
+  }
+}
+
+// Build system prompt with company context
+function buildSystemPrompt(companyContext) {
+  let prompt = `You are an AI assistant helping with ${companyContext.name}'s Facebook and Instagram ad campaigns. `;
+  
+  if (companyContext.industry) {
+    prompt += `The company operates in the ${companyContext.industry} industry. `;
+  }
+  
+  if (companyContext.products && companyContext.products.length > 0) {
+    prompt += `Their main products/services include: ${companyContext.products.join(", ")}. `;
+  }
+  
+  if (companyContext.targetAudience) {
+    prompt += `Their target audience: ${companyContext.targetAudience}. `;
+  }
+  
+  if (companyContext.brandValues) {
+    prompt += `Brand values: ${companyContext.brandValues}. `;
+  }
+  
+  if (companyContext.campaignGoals) {
+    prompt += `Campaign goals: ${companyContext.campaignGoals}. `;
+  }
+  
+  if (companyContext.notes) {
+    prompt += `Additional context: ${companyContext.notes}. `;
+  }
+  
+  prompt += `Use this information to provide personalized recommendations. Be helpful, concise, and professional. Remember past conversations and preferences to provide better suggestions over time.`;
+  
+  return prompt;
+}
 
 const app = express();
 app.use(express.json());
@@ -56,24 +172,45 @@ app.get("/diag/whoami", async (_req, res) => {
     res.status(500).json(e.response?.data || { error: String(e) });
   }
 });
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`✅ Backend on http://localhost:${PORT}`));
-// --- AI endpoints for the dashboard ---
-import OpenAI from "openai";
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+// Company context endpoints
+app.get("/api/company/context", (req, res) => {
+  try {
+    const context = loadCompanyContext();
+    res.json(context);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/company/context", (req, res) => {
+  try {
+    const currentContext = loadCompanyContext();
+    const updatedContext = { ...currentContext, ...req.body, updatedAt: new Date().toISOString() };
+    saveCompanyContext(updatedContext);
+    res.json({ success: true, context: updatedContext });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // Generate audience suggestions
 app.post("/api/ai/audience", async (req, res) => {
   try {
-    const { product } = req.body;
+    const { description } = req.body;
+    const companyContext = loadCompanyContext();
+    const systemPrompt = buildSystemPrompt(companyContext);
+    
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
-        { role: "system", content: "You are Marom’s Facebook Ads strategist." },
-        { role: "user", content: `Suggest 3 ideal Facebook target audiences for ${product}. Include age, gender, interests, and reason why they fit.` },
+        { role: "system", content: systemPrompt + " You are a Facebook Ads audience strategist. Provide detailed audience suggestions with demographics, interests, behaviors, estimated reach, and best use cases. Format as JSON with suggestions array." },
+        { role: "user", content: `Based on this description: "${description}", suggest 3 ideal Facebook target audiences. Format as JSON array with title, demographics, interests, behaviors, reach, and bestFor fields.` },
       ],
+      response_format: { type: "json_object" }
     });
-    res.json({ suggestions: completion.choices[0].message.content });
+    
+    const response = JSON.parse(completion.choices[0].message.content);
+    res.json({ suggestions: response.suggestions || [response] });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -82,15 +219,23 @@ app.post("/api/ai/audience", async (req, res) => {
 // Generate ad copy / creatives
 app.post("/api/ai/creatives", async (req, res) => {
   try {
-    const { product, tone } = req.body;
+    const { productDescription, language } = req.body;
+    const companyContext = loadCompanyContext();
+    const systemPrompt = buildSystemPrompt(companyContext);
+    
+    const langInstruction = language === "th" ? "Thai" : language === "en" ? "English" : "both Thai and English";
+    
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
-        { role: "system", content: "You are a creative copywriter for Marom natural cosmetics." },
-        { role: "user", content: `Write 3 short Facebook ad texts in ${tone || "English"} for ${product}. Make them natural, emotional, and add a call-to-action.` },
+        { role: "system", content: systemPrompt + " You are a creative copywriter. Generate multiple ad copy variants with headlines and primary text. Format as JSON with variants array, each containing name, th (headline/text), and en (headline/text) fields." },
+        { role: "user", content: `Create 3 Facebook ad copy variants in ${langInstruction} for: "${productDescription}". Make them natural, emotional, and include call-to-actions. Format as JSON.` },
       ],
+      response_format: { type: "json_object" }
     });
-    res.json({ copy: completion.choices[0].message.content });
+    
+    const response = JSON.parse(completion.choices[0].message.content);
+    res.json({ variants: response.variants || [response] });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -99,20 +244,34 @@ app.post("/api/ai/creatives", async (req, res) => {
 // Campaign improvement suggestions
 app.get("/api/ai/recommendations", async (req, res) => {
   try {
+    const companyContext = loadCompanyContext();
+    const conversations = loadConversations();
+    const systemPrompt = buildSystemPrompt(companyContext);
+    
+    // Include recent conversation insights
+    let conversationContext = "";
+    if (conversations.length > 0) {
+      const recent = conversations.slice(-5);
+      conversationContext = `Recent conversation insights: ${recent.map(c => `User: ${c.user.substring(0, 100)}... Assistant: ${c.assistant.substring(0, 100)}...`).join(" ")}`;
+    }
+    
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
-        { role: "system", content: "You are a Facebook Ads performance expert for Marom." },
-        { role: "user", content: "Suggest 3 actions to improve campaign performance for natural cosmetics (based on spend, CTR, CPM)." },
+        { role: "system", content: systemPrompt + " You are a Facebook Ads performance expert. Analyze campaign data and provide actionable recommendations. Format as JSON with recommendations array, each containing title, campaign, issue, performance, recommendation, and type fields." },
+        { role: "user", content: `Based on ${companyContext.name}'s context and campaign performance data, suggest 5 actionable recommendations to improve ad campaigns. ${conversationContext}` },
       ],
+      response_format: { type: "json_object" }
     });
-    res.json({ recommendations: completion.choices[0].message.content });
+    
+    const response = JSON.parse(completion.choices[0].message.content);
+    res.json({ recommendations: response.recommendations || [response] });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// Chat endpoint
+// Chat endpoint with memory
 app.post("/api/ai/chat", async (req, res) => {
   try {
     const { message, history = [] } = req.body;
@@ -121,29 +280,49 @@ app.post("/api/ai/chat", async (req, res) => {
       return res.status(400).json({ error: "Message is required" });
     }
 
+    // Load company context and past conversations
+    const companyContext = loadCompanyContext();
+    const pastConversations = loadConversations();
+    const systemPrompt = buildSystemPrompt(companyContext);
+    
     // Build messages array for OpenAI
     const messages = [
       {
         role: "system",
-        content: "You are an AI assistant helping with MAROM's Facebook and Instagram ad campaigns. You can help with campaign creation, audience targeting, creative ideas, optimization strategies, and general advertising advice. Be helpful, concise, and professional."
-      },
-      // Add conversation history
-      ...history.map(msg => ({
-        role: msg.role === "user" ? "user" : "assistant",
-        content: msg.content
-      })),
-      // Add current message
-      { role: "user", content: message }
+        content: systemPrompt + " Remember past conversations and use company context to provide personalized, relevant advice."
+      }
     ];
+    
+    // Add relevant past conversations (last 3) for context
+    if (pastConversations.length > 0) {
+      const recent = pastConversations.slice(-3);
+      messages.push({
+        role: "system",
+        content: `Previous conversation context: ${recent.map(c => `Q: ${c.user} A: ${c.assistant}`).join(" | ")}`
+      });
+    }
+    
+    // Add current conversation history
+    messages.push(...history.map(msg => ({
+      role: msg.role === "user" ? "user" : "assistant",
+      content: msg.content
+    })));
+    
+    // Add current message
+    messages.push({ role: "user", content: message });
 
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: messages,
       temperature: 0.7,
-      max_tokens: 500
+      max_tokens: 800
     });
 
     const aiResponse = completion.choices[0].message.content;
+    
+    // Save conversation to memory
+    saveConversation(message, aiResponse);
+    
     res.json({ message: aiResponse });
   } catch (err) {
     console.error("Chat error:", err);
@@ -158,3 +337,6 @@ app.post("/api/ai/recommendations/:type/apply", (req, res) => {
 app.post("/api/ai/recommendations/:type/dismiss", (req, res) => {
   res.json({ ok: true, message: `Dismissed recommendation: ${req.params.type}` });
 });
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`✅ Backend on http://localhost:${PORT}`));
