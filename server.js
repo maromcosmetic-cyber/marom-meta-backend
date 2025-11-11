@@ -126,6 +126,11 @@ function buildSystemPrompt(companyContext) {
 }
 
 const app = express();
+
+// Raw body parser for WhatsApp webhook signature verification (optional but recommended)
+app.use("/webhook/whatsapp", express.raw({ type: "application/json" }));
+
+// JSON parser for all other routes
 app.use(express.json());
 
 // Allow only your website to call the API
@@ -137,6 +142,10 @@ app.use(cors({
 const TOKEN = process.env.META_TOKEN;         // keep secret (never in frontend)
 const GRAPH = "https://graph.facebook.com/v24.0";
 
+// WhatsApp configuration
+const WHATSAPP_PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID;
+const WHATSAPP_ACCESS_TOKEN = process.env.WHATSAPP_ACCESS_TOKEN || TOKEN; // Can use same token if it has WhatsApp permissions
+
 // Helper
 const fb = async (path, method="GET", paramsOrBody={}) => {
   const cfg = { url: `${GRAPH}${path}`, method, headers: { Authorization: `Bearer ${TOKEN}` } };
@@ -147,7 +156,7 @@ const fb = async (path, method="GET", paramsOrBody={}) => {
 // Health
 app.get("/health", (_,res) => res.json({ ok: true }));
 
-// WhatsApp webhook verification
+// WhatsApp webhook verification (GET)
 app.get("/webhook/whatsapp", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
@@ -161,6 +170,144 @@ app.get("/webhook/whatsapp", (req, res) => {
     res.status(403).send("Forbidden");
   }
 });
+
+// WhatsApp webhook handler (POST) - receives incoming messages
+app.post("/webhook/whatsapp", async (req, res) => {
+  try {
+    const body = JSON.parse(req.body.toString());
+    
+    // Verify webhook signature (optional but recommended for production)
+    // You can add signature verification here using req.headers['x-hub-signature-256']
+    
+    if (body.object === "whatsapp_business_account") {
+      body.entry?.forEach((entry) => {
+        entry.changes?.forEach((change) => {
+          if (change.field === "messages") {
+            const value = change.value;
+            
+            // Handle incoming messages
+            if (value.messages) {
+              value.messages.forEach(async (message) => {
+                await handleIncomingWhatsAppMessage(message, value.contacts?.[0]);
+              });
+            }
+            
+            // Handle status updates (message delivered, read, etc.)
+            if (value.statuses) {
+              value.statuses.forEach((status) => {
+                console.log(`Message ${status.id} status: ${status.status}`);
+              });
+            }
+          }
+        });
+      });
+      
+      res.status(200).send("OK");
+    } else {
+      res.status(404).send("Not Found");
+    }
+  } catch (err) {
+    console.error("WhatsApp webhook error:", err);
+    res.status(500).send("Internal Server Error");
+  }
+});
+
+// Handle incoming WhatsApp message
+async function handleIncomingWhatsAppMessage(message, contact) {
+  const from = message.from;
+  const messageText = message.text?.body || "";
+  const messageType = message.type;
+  
+  console.log(`Received WhatsApp message from ${from}: ${messageText}`);
+  
+  // Only process text messages for now
+  if (messageType !== "text") {
+    await sendWhatsAppMessage(from, "I can only process text messages at the moment.");
+    return;
+  }
+  
+  // Use the same AI chat endpoint logic
+  try {
+    const companyContext = loadCompanyContext();
+    const pastConversations = loadConversations();
+    const systemPrompt = buildSystemPrompt(companyContext);
+    
+    // Build messages array for OpenAI
+    const messages = [
+      {
+        role: "system",
+        content: systemPrompt + " You are helping via WhatsApp. Keep responses concise and conversational. When users mention 'company profile' or 'dashboard', they mean the MAROM Ads Copilot dashboard."
+      }
+    ];
+    
+    // Add relevant past conversations (last 3) for context
+    if (pastConversations.length > 0) {
+      const recent = pastConversations.slice(-3);
+      messages.push({
+        role: "system",
+        content: `Previous conversation context: ${recent.map(c => `Q: ${c.user} A: ${c.assistant}`).join(" | ")}`
+      });
+    }
+    
+    // Add current message
+    messages.push({ role: "user", content: messageText });
+
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: messages,
+      temperature: 0.7,
+      max_tokens: 500 // Shorter for WhatsApp
+    });
+
+    const aiResponse = completion.choices[0].message.content;
+    
+    // Save conversation to memory
+    saveConversation(messageText, aiResponse);
+    
+    // Send response back to WhatsApp
+    await sendWhatsAppMessage(from, aiResponse);
+    
+  } catch (err) {
+    console.error("Error processing WhatsApp message:", err);
+    await sendWhatsAppMessage(from, "Sorry, I encountered an error processing your message. Please try again.");
+  }
+}
+
+// Send WhatsApp message
+async function sendWhatsAppMessage(to, text) {
+  if (!WHATSAPP_PHONE_NUMBER_ID || !WHATSAPP_ACCESS_TOKEN) {
+    console.error("WhatsApp credentials not configured");
+    return;
+  }
+  
+  try {
+    const response = await axios.post(
+      `${GRAPH}/${WHATSAPP_PHONE_NUMBER_ID}/messages`,
+      {
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
+        to: to,
+        type: "text",
+        text: {
+          preview_url: false,
+          body: text
+        }
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${WHATSAPP_ACCESS_TOKEN}`,
+          "Content-Type": "application/json"
+        }
+      }
+    );
+    
+    console.log(`WhatsApp message sent to ${to}:`, response.data);
+    return response.data;
+  } catch (err) {
+    console.error("Error sending WhatsApp message:", err.response?.data || err.message);
+    throw err;
+  }
+}
 
 // 1) List ad accounts
 app.get("/api/adaccounts", async (_,res) => {
