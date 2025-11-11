@@ -147,6 +147,21 @@ const fb = async (path, method="GET", paramsOrBody={}) => {
 // Health
 app.get("/health", (_,res) => res.json({ ok: true }));
 
+// WhatsApp webhook verification
+app.get("/webhook/whatsapp", (req, res) => {
+  const mode = req.query["hub.mode"];
+  const token = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
+  
+  if (mode === "subscribe" && token === process.env.WHATSAPP_VERIFY_TOKEN) {
+    console.log("WhatsApp webhook verified");
+    res.status(200).send(challenge);
+  } else {
+    console.log("WhatsApp webhook verification failed");
+    res.status(403).send("Forbidden");
+  }
+});
+
 // 1) List ad accounts
 app.get("/api/adaccounts", async (_,res) => {
   try { res.json(await fb(`/me/adaccounts`, "GET", { fields: "id,account_id,name,currency" })); }
