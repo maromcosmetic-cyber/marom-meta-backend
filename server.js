@@ -127,10 +127,7 @@ function buildSystemPrompt(companyContext) {
 
 const app = express();
 
-// Raw body parser for WhatsApp webhook signature verification (optional but recommended)
-app.use("/webhook/whatsapp", express.raw({ type: "application/json" }));
-
-// JSON parser for all other routes
+// JSON parser for all routes
 app.use(express.json());
 
 // Allow only your website to call the API
@@ -174,7 +171,7 @@ app.get("/webhook/whatsapp", (req, res) => {
 // WhatsApp webhook handler (POST) - receives incoming messages
 app.post("/webhook/whatsapp", async (req, res) => {
   try {
-    const body = JSON.parse(req.body.toString());
+    const body = req.body;
     
     // Verify webhook signature (optional but recommended for production)
     // You can add signature verification here using req.headers['x-hub-signature-256']
