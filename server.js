@@ -2300,23 +2300,25 @@ app.get("/api/products", async (req, res) => {
   }
 });
 
-// GET /api/products/:id - Get single product
+// GET /api/products/:id - Get single product (fresh from WooCommerce)
 app.get("/api/products/:id", async (req, res) => {
   try {
     const product = await wooFetch("GET", `/products/${req.params.id}`);
-    const normalized = normalizeProduct(product);
     
     res.json({
       source: "woo",
       success: true,
-      product: normalized
+      product: product // Return fresh WooCommerce object, not normalized
     });
   } catch (err) {
     console.error("[WooCommerce] Error fetching product:", err.message);
-    res.status(err.response?.status || 500).json({
+    const status = err.response?.status || 500;
+    const errorData = err.response?.data || { error: err.message || "Failed to fetch product" };
+    
+    res.status(status).json({
       source: "woo",
       success: false,
-      error: err.message || "Failed to fetch product"
+      ...errorData
     });
   }
 });
@@ -2375,23 +2377,114 @@ app.post("/api/products", requireAdminKey, async (req, res) => {
 // PUT /api/products/:id - Update product (admin only)
 app.put("/api/products/:id", requireAdminKey, async (req, res) => {
   try {
-    const productData = req.body;
-    const product = await wooFetch("PUT", `/products/${req.params.id}`, productData);
-    const normalized = normalizeProduct(product);
+    const { 
+      name, 
+      description, 
+      short_description, 
+      regular_price, 
+      sale_price, 
+      sku, 
+      stock_status, 
+      stock_quantity, 
+      status, 
+      categories, 
+      images, 
+      attributes, 
+      meta_data,
+      variation_id,
+      type
+    } = req.body;
     
-    console.log(`[WooCommerce] Product updated: ${normalized.name} (ID: ${normalized.id})`);
+    // Build WooCommerce payload with only provided fields
+    const wooPayload = {};
+    
+    if (name !== undefined) wooPayload.name = name;
+    if (description !== undefined) wooPayload.description = description;
+    if (short_description !== undefined) wooPayload.short_description = short_description;
+    if (regular_price !== undefined) wooPayload.regular_price = String(regular_price);
+    if (sale_price !== undefined) wooPayload.sale_price = String(sale_price);
+    if (sku !== undefined) wooPayload.sku = sku;
+    if (stock_status !== undefined) wooPayload.stock_status = stock_status;
+    if (stock_quantity !== undefined) wooPayload.stock_quantity = stock_quantity;
+    if (status !== undefined) wooPayload.status = status;
+    if (categories !== undefined) {
+      wooPayload.categories = Array.isArray(categories) 
+        ? categories.map(id => ({ id: Number(id) }))
+        : [];
+    }
+    if (images !== undefined) {
+      wooPayload.images = Array.isArray(images)
+        ? images.map(src => ({ src: String(src) }))
+        : [];
+    }
+    if (attributes !== undefined) wooPayload.attributes = attributes;
+    if (meta_data !== undefined) wooPayload.meta_data = meta_data;
+    
+    // Determine endpoint: variable products with variation_id use variations endpoint
+    let endpoint;
+    if (type === "variable" && variation_id) {
+      endpoint = `/products/${req.params.id}/variations/${variation_id}`;
+    } else {
+      endpoint = `/products/${req.params.id}`;
+    }
+    
+    // Use WC_API_URL directly (it ends with /products)
+    const baseUrl = WC_API_URL.replace(/\/products.*$/, ""); // Remove /products suffix
+    const fullUrl = `${baseUrl}${endpoint}`;
+    
+    // Build query params for authentication
+    const params = new URLSearchParams();
+    params.append("consumer_key", WC_API_KEY || "");
+    params.append("consumer_secret", WC_API_SECRET || "");
+    
+    const urlWithAuth = `${fullUrl}${fullUrl.includes("?") ? "&" : "?"}${params.toString()}`;
+    
+    const response = await axios.put(urlWithAuth, wooPayload, {
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+      },
+      timeout: 15000
+    });
+    
+    // Check for non-2xx responses
+    if (response.status < 200 || response.status >= 300) {
+      return res.status(response.status).json({
+        source: "woo",
+        success: false,
+        ...response.data
+      });
+    }
+    
+    console.log(`[WooCommerce] Product updated: ${response.data.name || req.params.id} (ID: ${req.params.id})`);
     
     res.json({
+      ok: true,
       source: "woo",
-      success: true,
-      product: normalized
+      product: response.data
     });
+    
   } catch (err) {
     console.error("[WooCommerce] Error updating product:", err.message);
-    res.status(err.response?.status || 500).json({
+    
+    // Bubble up WooCommerce errors - don't swallow
+    if (err.response) {
+      const status = err.response.status;
+      const errorData = err.response.data || { error: err.message };
+      
+      return res.status(status).json({
+        source: "woo",
+        success: false,
+        ...errorData
+      });
+    }
+    
+    // Connection/timeout errors
+    res.status(502).json({
       source: "woo",
       success: false,
-      error: err.message || "Failed to update product"
+      error: err.message || "Failed to update product",
+      code: err.code
     });
   }
 });
