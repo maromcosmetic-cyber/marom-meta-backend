@@ -8,9 +8,6 @@ import { fileURLToPath } from "url";
 import OpenAI from "openai";
 import sharp from "sharp";
 import FormData from "form-data";
-// Import new routes
-import mediaRoutes from "./routes/media.js";
-import whatsappWebhookRoutes from "./routes/whatsapp.js";
 dotenv.config();
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -3538,9 +3535,22 @@ app.get("/api/creatives/last", requireAdminKey, (req, res) => {
   }
 });
 
-// Mount new routes
-app.use("/api/media", mediaRoutes);
-app.use("/webhooks/whatsapp", whatsappWebhookRoutes);
+// Mount new routes (optional - only if files exist)
+async function loadVertexRoutes() {
+  try {
+    const mediaRoutes = (await import("./routes/media.js")).default;
+    const whatsappWebhookRoutes = (await import("./routes/whatsapp.js")).default;
+    app.use("/api/media", mediaRoutes);
+    app.use("/webhooks/whatsapp", whatsappWebhookRoutes);
+    console.log("✅ Vertex AI Content Creator routes loaded");
+  } catch (err) {
+    console.warn("⚠️  Vertex AI Content Creator routes not found. Skipping...");
+    console.warn("   Make sure routes/media.js and routes/whatsapp.js are deployed.");
+  }
+}
+
+// Load routes before starting server
+await loadVertexRoutes();
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`✅ Backend on http://localhost:${PORT}`));
