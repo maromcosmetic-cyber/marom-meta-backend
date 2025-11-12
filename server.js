@@ -19,7 +19,6 @@ const __dirname = path.dirname(__filename);
 const MEMORY_DIR = path.join(__dirname, "memory");
 const COMPANY_FILE = path.join(MEMORY_DIR, "company.json");
 const CONVERSATIONS_FILE = path.join(MEMORY_DIR, "conversations.json");
-const PRODUCTS_FILE = path.join(MEMORY_DIR, "products.json");
 
 // Ensure memory directory exists
 if (!fs.existsSync(MEMORY_DIR)) {
@@ -90,166 +89,92 @@ function saveConversation(userMessage, aiResponse) {
   }
 }
 
-// Product synchronization functions
-async function fetchProductsFromWebsite() {
-  const PRODUCTS_URL = process.env.PRODUCTS_URL || "https://maromcosmetic.com/products.json";
+// WooCommerce configuration
+const WC_API_URL = process.env.WC_API_URL || "https://maromcosmetic.com/wp-json/wc/v3/products";
+const WC_API_KEY = process.env.WC_API_KEY;
+const WC_API_SECRET = process.env.WC_API_SECRET;
+const WC_AUTH_MODE = process.env.WC_AUTH_MODE || "query";
+
+// WooCommerce API helper
+async function wooFetch(method, endpoint, body = null) {
+  const baseUrl = WC_API_URL.replace(/\/products.*$/, ""); // Remove /products suffix if present
+  const fullUrl = endpoint.startsWith("http") ? endpoint : `${baseUrl}${endpoint.startsWith("/") ? endpoint : `/${endpoint}`}`;
+  
+  // Build query params for authentication
+  const params = new URLSearchParams();
+  params.append("consumer_key", WC_API_KEY || "");
+  params.append("consumer_secret", WC_API_SECRET || "");
+  
+  const urlWithAuth = `${fullUrl}${fullUrl.includes("?") ? "&" : "?"}${params.toString()}`;
+  
+  const config = {
+    method,
+    url: urlWithAuth,
+    timeout: 15000,
+    headers: {
+      "Content-Type": "application/json",
+      "Accept": "application/json"
+    }
+  };
+  
+  if (body) {
+    config.data = body;
+  }
   
   try {
-    console.log(`[Products] Fetching from ${PRODUCTS_URL}`);
-    let response;
-    try {
-      response = await axios.get(PRODUCTS_URL, {
-        timeout: 15000,
-        headers: {
-          "User-Agent": "Mozilla/5.0 (compatible; MAROM-Ads-Copilot/1.0)",
-          "Accept": "application/json"
-        },
-        validateStatus: function (status) {
-          return status >= 200 && status < 500; // Don't throw on 4xx, we'll handle it
-        }
-      });
-    } catch (axiosErr) {
-      // If axios still throws (shouldn't happen with validateStatus, but just in case)
-      if (axiosErr.response) {
-        response = axiosErr.response;
-      } else {
-        throw axiosErr;
-      }
-    }
-    
-    // Check for HTTP errors
-    if (response.status >= 400) {
-      if (response.status === 404) {
-        throw new Error(`HTTP 404: The URL ${PRODUCTS_URL} was not found.\n\n` +
-          `Possible solutions:\n` +
-          `1. Check if the products.json endpoint exists\n` +
-          `2. Try alternative URLs:\n` +
-          `   - https://maromcosmetic.com/api/products.json\n` +
-          `   - https://maromcosmetic.com/products.json\n` +
-          `   - https://maromcosmetic.com/api/products\n` +
-          `3. Set PRODUCTS_URL environment variable to the correct endpoint\n` +
-          `4. If using Shopify, try: https://maromcosmetic.com/products.json (Shopify default)`);
-      } else {
-        throw new Error(`Website returned HTTP ${response.status}. Check if ${PRODUCTS_URL} is accessible.`);
-      }
-    }
-    
-    // Handle different response formats
-    let products = [];
-    if (Array.isArray(response.data)) {
-      products = response.data;
-    } else if (response.data && Array.isArray(response.data.products)) {
-      products = response.data.products;
-    } else if (response.data && typeof response.data === 'object') {
-      // Try to find products array in nested structure
-      const findProducts = (obj) => {
-        if (Array.isArray(obj)) return obj;
-        if (typeof obj !== 'object' || obj === null) return null;
-        if (obj.products && Array.isArray(obj.products)) return obj.products;
-        for (const key in obj) {
-          const found = findProducts(obj[key]);
-          if (found) return found;
-        }
-        return null;
-      };
-      products = findProducts(response.data) || [];
-    }
-    
-    if (products.length === 0) {
-      console.warn(`[Products] No products found in response. Response structure:`, JSON.stringify(response.data).substring(0, 200));
-    }
-    
-    console.log(`[Products] Fetched ${products.length} products from ${PRODUCTS_URL}`);
-    
-    return products;
+    const response = await axios(config);
+    return response.data;
   } catch (err) {
-    let errorMsg = '';
-    
-    if (err.response) {
-      const status = err.response.status;
-      if (status === 404) {
-        errorMsg = `HTTP 404: The URL ${PRODUCTS_URL} was not found.\n\n` +
-          `Possible solutions:\n` +
-          `1. Check if the products.json endpoint exists\n` +
-          `2. Try alternative URLs:\n` +
-          `   - https://maromcosmetic.com/api/products.json\n` +
-          `   - https://maromcosmetic.com/products.json\n` +
-          `   - https://maromcosmetic.com/api/products\n` +
-          `3. Set PRODUCTS_URL environment variable to the correct endpoint\n` +
-          `4. If using Shopify, try: https://maromcosmetic.com/products.json (Shopify default)`;
-      } else {
-        errorMsg = `HTTP ${status}: ${err.response.statusText}. URL: ${PRODUCTS_URL}`;
-      }
-    } else if (err.code === 'ECONNREFUSED' || err.code === 'ENOTFOUND') {
-      errorMsg = `Cannot connect to ${PRODUCTS_URL}. Check if the URL is correct and the website is accessible.`;
-    } else if (err.code === 'ETIMEDOUT') {
-      errorMsg = `Request timed out. The website ${PRODUCTS_URL} took too long to respond.`;
-    } else {
-      errorMsg = err.message || 'Unknown error';
+    // Retry once on 401
+    if (err.response?.status === 401 && WC_API_KEY && WC_API_SECRET) {
+      console.log("[WooCommerce] Retrying after 401...");
+      await new Promise(resolve => setTimeout(resolve, 500));
+      const retryResponse = await axios(config);
+      return retryResponse.data;
     }
+    throw err;
+  }
+}
+
+// Normalize WooCommerce product to standard format
+function normalizeProduct(wcProduct) {
+  return {
+    id: wcProduct.id,
+    name: wcProduct.name || "",
+    sku: wcProduct.sku || "",
+    price: wcProduct.price || "0",
+    sale_price: wcProduct.sale_price || null,
+    stock_status: wcProduct.stock_status || "instock",
+    stock_quantity: wcProduct.stock_quantity || null,
+    categories: (wcProduct.categories || []).map(cat => ({
+      id: cat.id,
+      name: cat.name
+    })),
+    image: wcProduct.images && wcProduct.images[0] ? wcProduct.images[0].src : null,
+    images: (wcProduct.images || []).map(img => img.src),
+    permalink: wcProduct.permalink || "",
+    status: wcProduct.status || "publish",
+    description: wcProduct.description || "",
+    short_description: wcProduct.short_description || ""
+  };
+}
+
+// Find product by name (searches WooCommerce)
+async function findProductByName(name) {
+  try {
+    const products = await wooFetch("GET", "/products", null);
+    const searchName = name.toLowerCase().trim();
     
-    console.error(`[Products] Error fetching from website:`, {
-      url: PRODUCTS_URL,
-      error: errorMsg,
-      code: err.code,
-      status: err.response?.status,
-      responseData: err.response?.data ? JSON.stringify(err.response.data).substring(0, 200) : null
+    const found = products.find(p => {
+      const productName = (p.name || "").toLowerCase();
+      return productName.includes(searchName);
     });
     
-    throw new Error(`Failed to fetch products from website: ${errorMsg}`);
-  }
-}
-
-function saveProductsCache(data) {
-  try {
-    const cacheData = {
-      products: data,
-      lastUpdated: new Date().toISOString(),
-      timestamp: Date.now()
-    };
-    fs.writeFileSync(PRODUCTS_FILE, JSON.stringify(cacheData, null, 2), "utf8");
-    console.log(`[Products] Cached ${data.length} products`);
-    return true;
+    return found ? normalizeProduct(found) : null;
   } catch (err) {
-    console.error("[Products] Error saving cache:", err);
-    return false;
+    console.error("[WooCommerce] Error finding product:", err.message);
+    return null;
   }
-}
-
-function loadProductsCache() {
-  try {
-    if (fs.existsSync(PRODUCTS_FILE)) {
-      const data = JSON.parse(fs.readFileSync(PRODUCTS_FILE, "utf8"));
-      return data.products || [];
-    }
-  } catch (err) {
-    console.error("[Products] Error loading cache:", err);
-  }
-  return [];
-}
-
-function getProductsCacheAge() {
-  try {
-    if (fs.existsSync(PRODUCTS_FILE)) {
-      const data = JSON.parse(fs.readFileSync(PRODUCTS_FILE, "utf8"));
-      if (data.timestamp) {
-        return Date.now() - data.timestamp;
-      }
-    }
-  } catch (err) {
-    // Ignore
-  }
-  return Infinity; // No cache = very old
-}
-
-function findProductByName(name) {
-  const products = loadProductsCache();
-  const searchName = name.toLowerCase().trim();
-  
-  return products.find(p => {
-    const productName = (p.name || p.title || "").toLowerCase();
-    return productName.includes(searchName);
-  });
 }
 
 // Build system prompt with company context
@@ -698,9 +623,9 @@ async function handleNaturalLanguageChat(from, messageText) {
         // Try to find specific product mentioned
         const productMatch = messageText.match(/\b(shampoo|hair|treatment|product|cream|serum|oil|mask)\b/i);
         if (productMatch) {
-          const foundProduct = findProductByName(productMatch[0]);
+          const foundProduct = await findProductByName(productMatch[0]);
           if (foundProduct) {
-            dataContext += `\n\nMATCHED PRODUCT DETAILS:\n- Name: ${foundProduct.name || foundProduct.title}\n- Price: ${foundProduct.price ? `$${foundProduct.price}` : "N/A"}\n- Description: ${(foundProduct.description || foundProduct.short_description || "").substring(0, 200)}`;
+            dataContext += `\n\nMATCHED PRODUCT DETAILS:\n- Name: ${foundProduct.name}\n- Price: ${foundProduct.price ? `$${foundProduct.price}` : "N/A"}\n- Description: ${(foundProduct.description || foundProduct.short_description || "").substring(0, 200)}`;
           }
         }
       } else {
@@ -712,13 +637,18 @@ async function handleNaturalLanguageChat(from, messageText) {
     if (lowerMessage.includes("create ad") || lowerMessage.includes("make ad") ||
         lowerMessage.includes("generate ad") || lowerMessage.includes("new campaign")) {
       detectedIntent = "create_ad";
-      const products = loadProductsCache();
-      if (products.length > 0) {
-        dataContext += `\n\nAVAILABLE PRODUCTS FOR AD CREATION:\n`;
-        products.slice(0, 10).forEach((p, i) => {
-          const name = p.name || p.title || "Unnamed";
-          dataContext += `${i + 1}. ${name}\n`;
-        });
+      try {
+        const products = await wooFetch("GET", "/products?per_page=10");
+        if (products && products.length > 0) {
+          dataContext += `\n\nAVAILABLE PRODUCTS FOR AD CREATION:\n`;
+          products.slice(0, 10).forEach((p, i) => {
+            const normalized = normalizeProduct(p);
+            const name = normalized.name || "Unnamed";
+            dataContext += `${i + 1}. ${name}\n`;
+          });
+        }
+      } catch (err) {
+        dataContext += `\n\nNote: Could not fetch products. Error: ${err.message}`;
       }
     }
     
@@ -728,13 +658,18 @@ async function handleNaturalLanguageChat(from, messageText) {
         lowerMessage.includes("product image") || lowerMessage.includes("need image") ||
         lowerMessage.includes("create photo") || lowerMessage.includes("generate photo")) {
       detectedIntent = "image_generation";
-      const products = loadProductsCache();
-      if (products.length > 0) {
-        dataContext += `\n\nAVAILABLE PRODUCTS FOR IMAGE GENERATION:\n`;
-        products.slice(0, 10).forEach((p, i) => {
-          const name = p.name || p.title || "Unnamed";
-          dataContext += `${i + 1}. ${name}\n`;
-        });
+      try {
+        const products = await wooFetch("GET", "/products?per_page=10");
+        if (products && products.length > 0) {
+          dataContext += `\n\nAVAILABLE PRODUCTS FOR IMAGE GENERATION:\n`;
+          products.slice(0, 10).forEach((p, i) => {
+            const normalized = normalizeProduct(p);
+            const name = normalized.name || "Unnamed";
+            dataContext += `${i + 1}. ${name}\n`;
+          });
+        }
+      } catch (err) {
+        dataContext += `\n\nNote: Could not fetch products. Error: ${err.message}`;
       }
       dataContext += `\n\nIMAGE GENERATION COMMANDS AVAILABLE:\n`;
       dataContext += `- /image <product> - Generate single square image\n`;
@@ -1353,12 +1288,12 @@ async function handleBudget(from, params) {
 async function handleIdeas(from, product) {
   try {
     const companyContext = loadCompanyContext();
-    const productData = findProductByName(product);
+    const productData = await findProductByName(product);
     const systemPrompt = buildSystemPrompt(companyContext);
     
     let productContext = "";
     if (productData) {
-      productContext = `\n\nProduct Details:\n- Name: ${productData.name || productData.title || product}\n- Description: ${productData.description || productData.short_description || "N/A"}\n- Price: ${productData.price ? `$${productData.price}` : "N/A"}\n- Benefits: ${(productData.benefits || productData.features || []).join(", ") || "N/A"}`;
+      productContext = `\n\nProduct Details:\n- Name: ${productData.name || product}\n- Description: ${productData.description || productData.short_description || "N/A"}\n- Price: ${productData.price ? `$${productData.price}` : "N/A"}`;
     }
     
     const completion = await openai.chat.completions.create({
@@ -1395,12 +1330,12 @@ async function handleIdeas(from, product) {
 async function handleCopy(from, product) {
   try {
     const companyContext = loadCompanyContext();
-    const productData = findProductByName(product);
+    const productData = await findProductByName(product);
     const systemPrompt = buildSystemPrompt(companyContext);
     
     let productContext = "";
     if (productData) {
-      productContext = `\n\nProduct Details:\n- Name: ${productData.name || productData.title || product}\n- Description: ${productData.description || productData.short_description || "N/A"}\n- Price: ${productData.price ? `$${productData.price}` : "N/A"}\n- Benefits: ${(productData.benefits || productData.features || []).join(", ") || "N/A"}`;
+      productContext = `\n\nProduct Details:\n- Name: ${productData.name || product}\n- Description: ${productData.description || productData.short_description || "N/A"}\n- Price: ${productData.price ? `$${productData.price}` : "N/A"}`;
     }
     
     const completion = await openai.chat.completions.create({
@@ -1436,12 +1371,12 @@ async function handleCopy(from, product) {
 async function handleAudience(from, product) {
   try {
     const companyContext = loadCompanyContext();
-    const productData = findProductByName(product);
+    const productData = await findProductByName(product);
     const systemPrompt = buildSystemPrompt(companyContext);
     
     let productContext = "";
     if (productData) {
-      productContext = `\n\nProduct Details:\n- Name: ${productData.name || productData.title || product}\n- Description: ${productData.description || productData.short_description || "N/A"}\n- Price: ${productData.price ? `$${productData.price}` : "N/A"}\n- Benefits: ${(productData.benefits || productData.features || []).join(", ") || "N/A"}`;
+      productContext = `\n\nProduct Details:\n- Name: ${productData.name || product}\n- Description: ${productData.description || productData.short_description || "N/A"}\n- Price: ${productData.price ? `$${productData.price}` : "N/A"}`;
     }
     
     const completion = await openai.chat.completions.create({
@@ -1483,12 +1418,12 @@ async function handleCreateAd(from, params) {
     const product = params[0];
     const budget = params[1];
     const companyContext = loadCompanyContext();
-    const productData = findProductByName(product);
+    const productData = await findProductByName(product);
     
     // Build product context
     let productContext = "";
     if (productData) {
-      productContext = `\n\nProduct Details:\n- Name: ${productData.name || productData.title || product}\n- Description: ${productData.description || productData.short_description || "N/A"}\n- Price: ${productData.price ? `$${productData.price}` : "N/A"}\n- Benefits: ${(productData.benefits || productData.features || []).join(", ") || "N/A"}`;
+      productContext = `\n\nProduct Details:\n- Name: ${productData.name || product}\n- Description: ${productData.description || productData.short_description || "N/A"}\n- Price: ${productData.price ? `$${productData.price}` : "N/A"}`;
     }
     
     // Generate copy and audience
@@ -1640,7 +1575,7 @@ async function handleProduct(from, name) {
       return;
     }
     
-    const productName = product.name || product.title || "Unnamed";
+    const productName = product.name || "Unnamed";
     const price = product.price ? `$${product.price}` : "N/A";
     const description = product.description || product.short_description || "No description";
     const benefits = product.benefits || product.features || [];
@@ -1669,48 +1604,30 @@ async function handleProduct(from, name) {
 
 async function handleSyncProducts(from) {
   try {
-    await sendWhatsAppMessage(from, "🔄 Syncing products from website...");
-    
-    const PRODUCTS_URL = process.env.PRODUCTS_URL || "https://maromcosmetic.com/products.json";
+    await sendWhatsAppMessage(from, "🔄 Fetching products from WooCommerce...");
     
     try {
-      const products = await fetchProductsFromWebsite();
+      const products = await wooFetch("GET", "/products?per_page=100");
       
-      if (products.length === 0) {
+      if (!products || products.length === 0) {
         await sendWhatsAppMessage(from, 
-          `⚠️ No products found at ${PRODUCTS_URL}\n\n` +
-          `The website may be:\n` +
-          `• Returning empty data\n` +
-          `• Using a different format\n` +
-          `• Blocking requests\n\n` +
-          `Check PRODUCTS_URL in your environment variables.`
+          `⚠️ No products found in WooCommerce.\n\n` +
+          `Check:\n` +
+          `• WC_API_URL is correct\n` +
+          `• WC_API_KEY and WC_API_SECRET are set\n` +
+          `• WooCommerce REST API is enabled`
         );
         return;
       }
       
-      saveProductsCache(products);
-      await sendWhatsAppMessage(from, `✅ Synced ${products.length} products successfully!`);
-      console.log(`[WhatsApp] /sync products executed by ${from}`);
+      await sendWhatsAppMessage(from, `✅ Found ${products.length} products in WooCommerce!`);
+      console.log(`[WhatsApp] /sync products executed by ${from}, found ${products.length} products`);
     } catch (fetchErr) {
-      // Provide detailed error message with 404-specific help
-      let errorMsg = `❌ Failed to sync products:\n\n${fetchErr.message}\n\n`;
-      
-      if (fetchErr.message.includes('404')) {
-        errorMsg += `🔍 404 Error - URL not found!\n\n` +
-          `Try these alternatives:\n` +
-          `• https://maromcosmetic.com/api/products.json\n` +
-          `• https://maromcosmetic.com/products.json\n` +
-          `• https://maromcosmetic.com/api/products\n\n` +
-          `Or set PRODUCTS_URL env var to the correct endpoint.\n\n`;
-      } else {
-        errorMsg += `Troubleshooting:\n` +
-          `1. Check PRODUCTS_URL: ${PRODUCTS_URL}\n` +
-          `2. Verify the URL is accessible\n` +
-          `3. Check if website blocks bots\n` +
-          `4. Try accessing ${PRODUCTS_URL} in a browser\n\n`;
-      }
-      
-      errorMsg += `Current cache: ${loadProductsCache().length} products`;
+      let errorMsg = `❌ Failed to fetch products:\n\n${fetchErr.message}\n\n`;
+      errorMsg += `Troubleshooting:\n`;
+      errorMsg += `1. Check WC_API_URL, WC_API_KEY, WC_API_SECRET env vars\n`;
+      errorMsg += `2. Verify WooCommerce REST API is enabled\n`;
+      errorMsg += `3. Check API key permissions\n`;
       
       await sendWhatsAppMessage(from, errorMsg);
       throw fetchErr;
@@ -1916,7 +1833,7 @@ function buildImagePrompt(product, session, companyContext, styleOverride = null
   const style = styleOverride || session.style;
   const angleDesc = ANGLE_PRESETS[session.angle] || ANGLE_PRESETS["front"];
   
-  let prompt = `${companyContext.name || "MAROM"} ${product.name || product.title || "product"}, `;
+  let prompt = `${companyContext.name || "MAROM"} ${product.name || "product"}, `;
   prompt += `${angleDesc}, `;
   prompt += `${style}, `;
   
@@ -1970,7 +1887,7 @@ async function handleImage(from, params) {
     const styleOverride = parts[1] ? parts[1].trim() : null;
     
     // Find product
-    const product = findProductByName(productQuery);
+    const product = await findProductByName(productQuery);
     if (!product) {
       await sendWhatsAppMessage(from, 
         `⚠️ Product not found: ${productQuery}\n\n` +
@@ -1992,7 +1909,7 @@ async function handleImage(from, params) {
     const mediaId = await uploadWhatsAppMedia(imageBuffer);
     
     // Send image
-    const productName = product.name || product.title || productQuery;
+    const productName = product.name || productQuery;
     const caption = `${productName} • angle: ${session.angle}`;
     await sendWhatsAppImage(from, mediaId, caption);
     
@@ -2015,7 +1932,7 @@ async function handleImages(from, params) {
     }
     
     const productQuery = params.join(" ");
-    const product = findProductByName(productQuery);
+    const product = await findProductByName(productQuery);
     if (!product) {
       await sendWhatsAppMessage(from, 
         `⚠️ Product not found: ${productQuery}\n\n` +
@@ -2038,7 +1955,7 @@ async function handleImages(from, params) {
     const portrait = await sharp(baseImage).resize(1080, 1350, { fit: "cover" }).jpeg({ quality: 87 }).toBuffer();
     const story = await sharp(baseImage).resize(1080, 1920, { fit: "cover" }).jpeg({ quality: 87 }).toBuffer();
     
-    const productName = product.name || product.title || productQuery;
+    const productName = product.name || productQuery;
     
     // Upload and send square
     const squareMediaId = await uploadWhatsAppMedia(square);
@@ -2091,7 +2008,7 @@ async function handleRedo(from) {
   try {
     await sendWhatsAppMessage(from, "🔄 Regenerating with new seed...");
     
-    const product = findProductByName(last.product);
+    const product = await findProductByName(last.product);
     if (!product) {
       await sendWhatsAppMessage(from, `⚠️ Product "${last.product}" not found. Use /image <product> to generate.`);
       return;
@@ -2160,43 +2077,160 @@ app.get("/api/company/context", (req, res) => {
   }
 });
 
-// Products endpoint
+// WooCommerce Products CRUD endpoints
+
+// GET /api/products - List products
 app.get("/api/products", async (req, res) => {
   try {
-    const refresh = req.query.refresh === "true";
-    const cacheAge = getProductsCacheAge();
-    const cacheAgeHours = cacheAge / (1000 * 60 * 60);
+    const perPage = parseInt(req.query.per_page) || 50;
+    const page = parseInt(req.query.page) || 1;
+    const search = req.query.search || "";
     
-    // Refresh if explicitly requested or cache is older than 24 hours
-    if (refresh || cacheAgeHours > 24) {
-      console.log(`[Products] ${refresh ? "Manual refresh" : "Auto-refresh (cache > 24h)"}`);
-      const products = await fetchProductsFromWebsite();
-      saveProductsCache(products);
-      res.json({ 
-        products, 
-        cached: false, 
-        lastUpdated: new Date().toISOString(),
-        count: products.length 
-      });
-    } else {
-      const products = loadProductsCache();
-      console.log(`[Products] Serving from cache (${cacheAgeHours.toFixed(1)}h old)`);
-      res.json({ 
-        products, 
-        cached: true, 
-        lastUpdated: fs.existsSync(PRODUCTS_FILE) ? JSON.parse(fs.readFileSync(PRODUCTS_FILE, "utf8")).lastUpdated : null,
-        count: products.length 
-      });
+    let endpoint = `/products?per_page=${perPage}&page=${page}`;
+    if (search) {
+      endpoint += `&search=${encodeURIComponent(search)}`;
     }
+    
+    const products = await wooFetch("GET", endpoint);
+    const normalized = Array.isArray(products) ? products.map(normalizeProduct) : [];
+    
+    res.json({
+      source: "woo",
+      success: true,
+      products: normalized,
+      count: normalized.length,
+      page,
+      per_page: perPage
+    });
   } catch (err) {
-    console.error("[Products] Error in /api/products:", err);
-    // Fallback to cache if fetch fails
-    const products = loadProductsCache();
-    res.json({ 
-      products, 
-      cached: true, 
-      error: err.message,
-      count: products.length 
+    console.error("[WooCommerce] Error fetching products:", err.message);
+    res.status(500).json({
+      source: "woo",
+      success: false,
+      error: err.message || "Failed to fetch products"
+    });
+  }
+});
+
+// GET /api/products/:id - Get single product
+app.get("/api/products/:id", async (req, res) => {
+  try {
+    const product = await wooFetch("GET", `/products/${req.params.id}`);
+    const normalized = normalizeProduct(product);
+    
+    res.json({
+      source: "woo",
+      success: true,
+      product: normalized
+    });
+  } catch (err) {
+    console.error("[WooCommerce] Error fetching product:", err.message);
+    res.status(err.response?.status || 500).json({
+      source: "woo",
+      success: false,
+      error: err.message || "Failed to fetch product"
+    });
+  }
+});
+
+// GET /api/categories - List categories
+app.get("/api/categories", async (req, res) => {
+  try {
+    const categories = await wooFetch("GET", "/products/categories?per_page=100");
+    const normalized = Array.isArray(categories) ? categories.map(cat => ({
+      id: cat.id,
+      name: cat.name,
+      slug: cat.slug,
+      count: cat.count || 0
+    })) : [];
+    
+    res.json({
+      source: "woo",
+      success: true,
+      categories: normalized,
+      count: normalized.length
+    });
+  } catch (err) {
+    console.error("[WooCommerce] Error fetching categories:", err.message);
+    res.status(500).json({
+      source: "woo",
+      success: false,
+      error: err.message || "Failed to fetch categories"
+    });
+  }
+});
+
+// POST /api/products - Create product (admin only)
+app.post("/api/products", requireAdminKey, async (req, res) => {
+  try {
+    const productData = req.body;
+    const product = await wooFetch("POST", "/products", productData);
+    const normalized = normalizeProduct(product);
+    
+    console.log(`[WooCommerce] Product created: ${normalized.name} (ID: ${normalized.id})`);
+    
+    res.json({
+      source: "woo",
+      success: true,
+      product: normalized
+    });
+  } catch (err) {
+    console.error("[WooCommerce] Error creating product:", err.message);
+    res.status(err.response?.status || 500).json({
+      source: "woo",
+      success: false,
+      error: err.message || "Failed to create product"
+    });
+  }
+});
+
+// PUT /api/products/:id - Update product (admin only)
+app.put("/api/products/:id", requireAdminKey, async (req, res) => {
+  try {
+    const productData = req.body;
+    const product = await wooFetch("PUT", `/products/${req.params.id}`, productData);
+    const normalized = normalizeProduct(product);
+    
+    console.log(`[WooCommerce] Product updated: ${normalized.name} (ID: ${normalized.id})`);
+    
+    res.json({
+      source: "woo",
+      success: true,
+      product: normalized
+    });
+  } catch (err) {
+    console.error("[WooCommerce] Error updating product:", err.message);
+    res.status(err.response?.status || 500).json({
+      source: "woo",
+      success: false,
+      error: err.message || "Failed to update product"
+    });
+  }
+});
+
+// DELETE /api/products/:id - Delete product (admin only)
+app.delete("/api/products/:id", requireAdminKey, async (req, res) => {
+  try {
+    const force = req.query.force === "true";
+    const endpoint = `/products/${req.params.id}${force ? "?force=true" : ""}`;
+    
+    const product = await wooFetch("DELETE", endpoint);
+    const normalized = normalizeProduct(product);
+    
+    console.log(`[WooCommerce] Product deleted: ${normalized.name} (ID: ${normalized.id})`);
+    
+    res.json({
+      source: "woo",
+      success: true,
+      product: normalized,
+      deleted: true
+    });
+  } catch (err) {
+    console.error("[WooCommerce] Error deleting product:", err.message);
+    res.status(err.response?.status || 500).json({
+      source: "woo",
+      success: false,
+      error: err.message || "Failed to delete product"
     });
   }
 });
@@ -2504,7 +2538,7 @@ app.post("/api/creatives/generate", requireAdminKey, async (req, res) => {
     }
     
     // Find product
-    const product = findProductByName(productQuery);
+    const product = await findProductByName(productQuery);
     if (!product) {
       return res.status(404).json({ ok: false, error: `Product not found: ${productQuery}` });
     }
@@ -2522,7 +2556,7 @@ app.post("/api/creatives/generate", requireAdminKey, async (req, res) => {
     // Generate base image
     const baseImage = await generateImageWithNanoBanana(prompt, 1024, 1024);
     
-    const productName = product.name || product.title || productQuery;
+    const productName = product.name || productQuery;
     const items = [];
     
     if (pack) {
