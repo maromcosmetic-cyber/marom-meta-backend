@@ -251,8 +251,20 @@ const WHATSAPP_ACCESS_TOKEN = process.env.WHATSAPP_ACCESS_TOKEN || TOKEN; // Can
 const ADMIN_NUMBERS = (process.env.ADMIN_NUMBERS || "").split(",").map(s => s.trim()).filter(Boolean);
 
 // Nano Banana configuration
-const NANOBANANA_URL = process.env.NANOBANANA_URL || "http://127.0.0.1:7860";
+const NB_BASE_URL = process.env.NB_BASE_URL; // Required, no default
+const NB_API_KEY = process.env.NB_API_KEY; // Optional
+const NB_TIMEOUT_MS = parseInt(process.env.NB_TIMEOUT_MS) || 60000;
 const ADMIN_DASH_KEY = process.env.ADMIN_DASH_KEY;
+
+// Create reusable axios instance for Nano Banana API
+const nbApi = axios.create({
+  baseURL: NB_BASE_URL,
+  timeout: NB_TIMEOUT_MS,
+  headers: {
+    "Content-Type": "application/json",
+    ...(NB_API_KEY && { Authorization: `Bearer ${NB_API_KEY}` })
+  }
+});
 
 // Admin key middleware
 function requireAdminKey(req, res, next) {
@@ -1887,13 +1899,23 @@ async function sendWhatsAppImage(to, mediaId, caption = "") {
   }
 }
 
+// Check if Nano Banana is configured
+function checkNbConfig() {
+  if (!NB_BASE_URL) {
+    throw new Error("Image engine not configured. Set NB_BASE_URL in environment.");
+  }
+}
+
 // Generate image with Nano Banana
 async function generateImageWithNanoBanana(prompt, width = 1024, height = 1024) {
+  checkNbConfig();
+  
   try {
-    console.log(`[Nano Banana] Generating ${width}x${height}: ${prompt.substring(0, 100)}...`);
+    // Log only method, path, and status - never prompts or keys
+    console.log(`[Nano Banana] POST /generate ${width}x${height}`);
     
-    const response = await axios.post(
-      `${NANOBANANA_URL}/generate`,
+    const response = await nbApi.post(
+      "/generate",
       {
         prompt: prompt,
         width: width,
@@ -1903,10 +1925,11 @@ async function generateImageWithNanoBanana(prompt, width = 1024, height = 1024) 
         negative_prompt: "text, price, watermark, logo, blurry, low quality"
       },
       {
-        responseType: "arraybuffer",
-        timeout: 60000
+        responseType: "arraybuffer"
       }
     );
+    
+    console.log(`[Nano Banana] POST /generate ${response.status}`);
     
     // Convert to JPEG with sharp
     const jpegBuffer = await sharp(Buffer.from(response.data))
@@ -1925,8 +1948,41 @@ async function generateImageWithNanoBanana(prompt, width = 1024, height = 1024) 
     
     return jpegBuffer;
   } catch (err) {
-    console.error("[Nano Banana] Error:", err.message);
-    throw new Error(`Image generation failed: ${err.message}`);
+    // Handle connection errors
+    if (err.code === "ECONNREFUSED" || err.code === "ETIMEDOUT" || err.code === "ENOTFOUND") {
+      console.error(`[Nano Banana] Connection error: ${err.code}`);
+      throw {
+        status: 502,
+        message: "Image engine unreachable",
+        details: err.code
+      };
+    }
+    
+    // Handle non-2xx responses
+    if (err.response) {
+      const status = err.response.status;
+      const message = err.response.data?.error || err.response.data?.message || `HTTP ${status}`;
+      console.error(`[Nano Banana] POST /generate ${status}`);
+      throw {
+        status: status,
+        message: message
+      };
+    }
+    
+    // Re-throw configuration errors
+    if (err.message.includes("Image engine not configured")) {
+      throw {
+        status: 503,
+        message: err.message
+      };
+    }
+    
+    // Generic error
+    console.error(`[Nano Banana] Error: ${err.message}`);
+    throw {
+      status: 500,
+      message: `Image generation failed: ${err.message}`
+    };
   }
 }
 
@@ -2022,7 +2078,17 @@ async function handleImage(from, params) {
     
   } catch (err) {
     console.error("[Image] Error:", err);
-    await sendWhatsAppMessage(from, `⚠️ Image generation failed. ${err.message}\n\nCheck Nano Banana endpoint or try a simpler style.`);
+    
+    let errorMsg = "⚠️ Image generation failed.";
+    if (err.status === 503) {
+      errorMsg = "⚠️ Image engine not configured. Please set NB_BASE_URL in environment.";
+    } else if (err.status === 502) {
+      errorMsg = `⚠️ Image engine unreachable (${err.details || "connection error"}).\n\nCheck NB_BASE_URL and ensure the service is running.`;
+    } else if (err.message) {
+      errorMsg = `⚠️ ${err.message}`;
+    }
+    
+    await sendWhatsAppMessage(from, errorMsg);
   }
 }
 
@@ -2082,7 +2148,17 @@ async function handleImages(from, params) {
     
   } catch (err) {
     console.error("[Images] Error:", err);
-    await sendWhatsAppMessage(from, `⚠️ Image generation failed. ${err.message}\n\nCheck Nano Banana endpoint or try a simpler style.`);
+    
+    let errorMsg = "⚠️ Image generation failed.";
+    if (err.status === 503) {
+      errorMsg = "⚠️ Image engine not configured. Please set NB_BASE_URL in environment.";
+    } else if (err.status === 502) {
+      errorMsg = `⚠️ Image engine unreachable (${err.details || "connection error"}).\n\nCheck NB_BASE_URL and ensure the service is running.`;
+    } else if (err.message) {
+      errorMsg = `⚠️ ${err.message}`;
+    }
+    
+    await sendWhatsAppMessage(from, errorMsg);
   }
 }
 
@@ -2135,7 +2211,17 @@ async function handleRedo(from) {
     
   } catch (err) {
     console.error("[Redo] Error:", err);
-    await sendWhatsAppMessage(from, `⚠️ Regeneration failed. ${err.message}`);
+    
+    let errorMsg = "⚠️ Regeneration failed.";
+    if (err.status === 503) {
+      errorMsg = "⚠️ Image engine not configured. Please set NB_BASE_URL in environment.";
+    } else if (err.status === 502) {
+      errorMsg = `⚠️ Image engine unreachable (${err.details || "connection error"}).\n\nCheck NB_BASE_URL and ensure the service is running.`;
+    } else if (err.message) {
+      errorMsg = `⚠️ ${err.message}`;
+    }
+    
+    await sendWhatsAppMessage(from, errorMsg);
   }
 }
 
@@ -2656,7 +2742,21 @@ app.post("/api/creatives/generate", requireAdminKey, async (req, res) => {
     const prompt = buildImagePrompt(product, tempSession, companyContext);
     
     // Generate base image
-    const baseImage = await generateImageWithNanoBanana(prompt, 1024, 1024);
+    let baseImage;
+    try {
+      baseImage = await generateImageWithNanoBanana(prompt, 1024, 1024);
+    } catch (err) {
+      // Handle structured errors from generateImageWithNanoBanana
+      const status = err.status || 500;
+      const error = err.message || err.toString();
+      const details = err.details;
+      
+      return res.status(status).json({ 
+        ok: false, 
+        error: error,
+        ...(details && { details })
+      });
+    }
     
     const productName = product.name || productQuery;
     const items = [];
@@ -2726,7 +2826,9 @@ app.post("/api/creatives/generate", requireAdminKey, async (req, res) => {
     
   } catch (err) {
     console.error("[Creatives API] Error:", err);
-    res.status(500).json({ ok: false, error: err.message });
+    const status = err.status || 500;
+    const error = err.message || err.toString();
+    res.status(status).json({ ok: false, error });
   }
 });
 
