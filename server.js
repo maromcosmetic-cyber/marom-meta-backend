@@ -503,6 +503,76 @@ function logCommand(command, from, result) {
 }
 
 // Handle incoming WhatsApp message
+// Parse natural language product edit requests
+function parseProductEditRequest(messageText) {
+  const lower = messageText.toLowerCase();
+  
+  // Patterns: "change name to X", "update title to X", "set name as X", "make it X", "rename to X"
+  const namePatterns = [
+    /(?:change|update|set|make|rename|edit)\s+(?:the\s+)?(?:product\s+)?(?:name|title)\s+(?:to|as|is)\s+["']?([^"'\n]+)["']?/i,
+    /(?:name|title)\s+(?:should\s+be|is|to)\s+["']?([^"'\n]+)["']?/i,
+    /(?:change|update)\s+["']?([^"'\n]+)["']?\s+(?:name|title)/i,
+    /(?:want|need)\s+(?:the\s+)?(?:name|title)\s+(?:to\s+be|as)\s+["']?([^"'\n]+)["']?/i
+  ];
+  
+  // Patterns: "change price to X", "update price to $X", "set price as X"
+  const pricePatterns = [
+    /(?:change|update|set|make)\s+(?:the\s+)?(?:product\s+)?price\s+(?:to|as|is)\s+[$]?([\d.]+)/i,
+    /price\s+(?:should\s+be|is|to)\s+[$]?([\d.]+)/i,
+    /(?:want|need)\s+(?:the\s+)?price\s+(?:to\s+be|as)\s+[$]?([\d.]+)/i
+  ];
+  
+  // Patterns: "change description to X", "update description"
+  const descPatterns = [
+    /(?:change|update|set)\s+(?:the\s+)?(?:product\s+)?description\s+(?:to|as|is)\s+["']?([^"'\n]+)["']?/i,
+    /description\s+(?:should\s+be|is|to)\s+["']?([^"'\n]+)["']?/i
+  ];
+  
+  // Find product name (look for product mentions or common product words)
+  const productMatch = messageText.match(/\b(shampoo|hair|treatment|cream|serum|oil|mask|product|item|it)\b/i);
+  const productName = productMatch && productMatch[0].toLowerCase() !== "it" ? productMatch[0] : null;
+  
+  const updates = {};
+  
+  // Extract name/title
+  for (const pattern of namePatterns) {
+    const match = messageText.match(pattern);
+    if (match && match[1]) {
+      updates.title = match[1].trim();
+      break;
+    }
+  }
+  
+  // Extract price
+  for (const pattern of pricePatterns) {
+    const match = messageText.match(pattern);
+    if (match && match[1]) {
+      updates.price = match[1].trim();
+      break;
+    }
+  }
+  
+  // Extract description
+  for (const pattern of descPatterns) {
+    const match = messageText.match(pattern);
+    if (match && match[1]) {
+      updates.description = match[1].trim();
+      break;
+    }
+  }
+  
+  // If we found updates but no product name, try to infer from context
+  if (Object.keys(updates).length > 0 && !productName) {
+    // Look for quoted product names or common patterns
+    const quotedMatch = messageText.match(/["']([^"']+)["']/);
+    if (quotedMatch && !quotedMatch[1].match(/^\d+\.?\d*$/)) { // Not just a number
+      return { productName: quotedMatch[1], updates };
+    }
+  }
+  
+  return Object.keys(updates).length > 0 && productName ? { productName, updates } : null;
+}
+
 async function handleIncomingWhatsAppMessage(message, contact) {
   const from = message.from;
   const messageText = message.text?.body || "";
@@ -535,6 +605,71 @@ async function handleIncomingWhatsAppMessage(message, contact) {
     
     await executeCommand(from, command, params, false);
   } else {
+    // Check for natural language product edit requests first
+    const editRequest = parseProductEditRequest(messageText);
+    if (editRequest && editRequest.productName && Object.keys(editRequest.updates).length > 0) {
+      // Execute the edit directly
+      try {
+        const product = await findProductByName(editRequest.productName);
+        if (!product) {
+          await sendWhatsAppMessage(from, `I couldn't find a product called "${editRequest.productName}". Want me to list all products?`);
+          return;
+        }
+        
+        if (!isAdmin(from)) {
+          await sendWhatsAppMessage(from, "⚠️ Product editing requires admin access.");
+          return;
+        }
+        
+        // Build update payload
+        const updateData = {};
+        if (editRequest.updates.title) updateData.name = editRequest.updates.title;
+        if (editRequest.updates.price) updateData.regular_price = String(editRequest.updates.price);
+        if (editRequest.updates.description) updateData.description = editRequest.updates.description;
+        
+        // Execute update (reuse the same logic from handleProduct)
+        const baseUrl = WC_API_URL.replace(/\/products.*$/, "");
+        const endpoint = `/products/${product.id}`;
+        const fullUrl = `${baseUrl}${endpoint}`;
+        
+        const queryParams = new URLSearchParams();
+        queryParams.append("consumer_key", WC_API_KEY || "");
+        queryParams.append("consumer_secret", WC_API_SECRET || "");
+        
+        const urlWithAuth = `${fullUrl}?${queryParams.toString()}`;
+        
+        const response = await axios.put(urlWithAuth, updateData, {
+          headers: {
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+          },
+          timeout: 15000
+        });
+        
+        if (response.status >= 200 && response.status < 300) {
+          const freshProduct = await wooFetch("GET", `/products/${product.id}`);
+          let confirmMsg = `✅ Done! Updated ${product.name}:\n\n`;
+          
+          if (editRequest.updates.title) {
+            confirmMsg += `📦 Name: ${freshProduct.name || editRequest.updates.title}\n`;
+          }
+          if (editRequest.updates.price) {
+            confirmMsg += `💰 Price: $${freshProduct.regular_price || editRequest.updates.price}\n`;
+          }
+          if (editRequest.updates.description) {
+            confirmMsg += `📝 Description updated\n`;
+          }
+          
+          await sendWhatsAppMessage(from, confirmMsg);
+          return; // Don't process as natural language chat
+        }
+      } catch (err) {
+        console.error("[WhatsApp] Natural language edit error:", err.response?.data || err.message);
+        await sendWhatsAppMessage(from, `Hmm, I had trouble updating that. ${err.response?.data?.message || err.message}`);
+        return;
+      }
+    }
+    
     // Natural language AI chat with data integration
     await handleNaturalLanguageChat(from, messageText);
   }
@@ -730,8 +865,9 @@ async function handleNaturalLanguageChat(from, messageText) {
     systemPrompt += "\nFor image generation requests, respond enthusiastically: 'I'd love to help! Use /image [product] for a single image, or /images [product] for a full pack with all sizes.'";
     systemPrompt += "\nIf you don't have data, guide them naturally: 'Let me check that for you - try /stats or /campaigns to see what's running.'";
     systemPrompt += "\nFor campaign actions, suggest commands naturally: 'Want to pause that campaign? Just use /pause [campaign name].'";
-    systemPrompt += "\nFor product management, guide them: 'I can help you edit products! Use /product edit [name] title=\"...\" or price=... to update them.'";
-    systemPrompt += "\nBe proactive and helpful - if they mention a product, offer to generate images, create ads, or help manage product details.";
+    systemPrompt += "\nFor product edits: When users say things like 'change the name to X' or 'update price to Y', you can acknowledge it but DON'T explain commands - the system will handle it automatically. Just respond naturally like 'Got it! Updating that for you...' or 'Done! Changed the name to X.'";
+    systemPrompt += "\nBe proactive and action-oriented - if they want to change something, acknowledge it warmly and let them know it's being done. Don't give instructions unless they explicitly ask how to do something.";
+    systemPrompt += "\nKeep responses conversational and brief - like texting a friend, not a manual.";
     
     if (detectedIntent) {
       systemPrompt += `\n\nUser intent detected: ${detectedIntent}`;
@@ -1618,26 +1754,29 @@ async function handleProducts(from) {
 
 async function handleProduct(from, params) {
   try {
-    if (!params || params.length === 0) {
+    // Ensure params is an array
+    const productParams = Array.isArray(params) ? params : (params ? [params] : []);
+    
+    if (!productParams || productParams.length === 0) {
       await sendWhatsAppMessage(from, "📦 Product Commands:\n\n• /product <name> - Get product info\n• /product edit <name> title=\"New Title\" - Edit title\n• /product edit <name> price=99.99 - Edit price\n• /product edit <name> description=\"New desc\" - Edit description\n• /product info <name> - Full details");
       return;
     }
     
-    const action = params[0]?.toLowerCase();
+    const action = productParams[0]?.toLowerCase();
     
     // Handle edit command
-    if (action === "edit" && params.length >= 3) {
+    if (action === "edit" && productParams.length >= 3) {
       if (!isAdmin(from)) {
         await sendWhatsAppMessage(from, "⚠️ Product editing requires admin access.");
         return;
       }
       
-      const productName = params[1];
+      const productName = productParams[1];
       const updates = {};
       
       // Parse update parameters (title="...", price=99.99, description="...")
-      for (let i = 2; i < params.length; i++) {
-        const param = params[i];
+      for (let i = 2; i < productParams.length; i++) {
+        const param = productParams[i];
         if (param.includes("=")) {
           const [key, ...valueParts] = param.split("=");
           const value = valueParts.join("=").replace(/^["']|["']$/g, ""); // Remove quotes
@@ -1670,11 +1809,11 @@ async function handleProduct(from, params) {
       const fullUrl = `${baseUrl}${endpoint}`;
       
       // Build query params for authentication
-      const params = new URLSearchParams();
-      params.append("consumer_key", WC_API_KEY || "");
-      params.append("consumer_secret", WC_API_SECRET || "");
+      const queryParams = new URLSearchParams();
+      queryParams.append("consumer_key", WC_API_KEY || "");
+      queryParams.append("consumer_secret", WC_API_SECRET || "");
       
-      const urlWithAuth = `${fullUrl}?${params.toString()}`;
+      const urlWithAuth = `${fullUrl}?${queryParams.toString()}`;
       
       try {
         console.log(`[WhatsApp] Updating product ${product.id} with data:`, JSON.stringify(updateData));
@@ -1747,7 +1886,7 @@ async function handleProduct(from, params) {
     }
     
     // Handle info command or default to showing product info
-    const searchName = action === "info" ? params.slice(1).join(" ") : params.join(" ");
+    const searchName = action === "info" ? productParams.slice(1).join(" ") : productParams.join(" ");
     const product = await findProductByName(searchName);
     
     if (!product) {
