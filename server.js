@@ -4147,6 +4147,56 @@ app.get("/api/adaccounts/:actId/insights", async (req,res) => {
   catch(e){ res.status(500).json(e.response?.data || { error:String(e) }); }
 });
 
+// Create campaign endpoint
+app.post("/api/campaigns/create", requireAdminKey, async (req, res) => {
+  try {
+    const { accountId, name, objective, budget, audience, startDate, endDate } = req.body;
+    
+    if (!accountId) {
+      return res.status(400).json({ success: false, error: "Account ID is required" });
+    }
+    if (!name) {
+      return res.status(400).json({ success: false, error: "Campaign name is required" });
+    }
+    if (!budget || budget <= 0) {
+      return res.status(400).json({ success: false, error: "Valid budget is required" });
+    }
+    
+    const campaignData = {
+      name,
+      objective: objective || "CONVERSIONS",
+      budget: parseFloat(budget),
+      audience: audience || {},
+      startTime: startDate ? new Date(startDate).toISOString() : null,
+      endTime: endDate ? new Date(endDate).toISOString() : null
+    };
+    
+    const result = await createCampaignStructure(accountId, campaignData);
+    
+    res.json({
+      success: true,
+      campaign: {
+        id: result.campaignId,
+        name,
+        accountId,
+        adSetId: result.adSetId,
+        adId: result.adId
+      }
+    });
+  } catch (e) {
+    console.error("[Campaign Creation] Error:", e);
+    const status = e.response?.status || 500;
+    const errorData = e.response?.data || {};
+    const errorMessage = errorData.error?.message || errorData.error || e.message || String(e);
+    
+    res.status(status).json({
+      success: false,
+      error: errorMessage,
+      details: errorData.error?.error_subcode || null
+    });
+  }
+});
+
 // --- Diagnostic routes ---
 app.get("/diag/permissions", async (_req, res) => {
   try {
