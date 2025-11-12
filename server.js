@@ -8,6 +8,17 @@ import { fileURLToPath } from "url";
 import OpenAI from "openai";
 import sharp from "sharp";
 import FormData from "form-data";
+import {
+  WORKFLOWS,
+  isMenuTrigger,
+  isWorkflowNavigation,
+  isShortcut,
+  showMainMenu,
+  handleWorkflowNavigation,
+  handleWorkflowStep,
+  handleShortcut,
+  initWorkflows
+} from "./workflows.js";
 dotenv.config();
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -321,9 +332,9 @@ function buildSystemPrompt(companyContext) {
   prompt += `- You're helping them use the MAROM Ads Copilot dashboard (not Facebook/Instagram directly)\n`;
   prompt += `- When they mention "company profile", they mean the dashboard's Company Profile tab for AI personalization\n`;
   prompt += `- You can help with: creating campaigns, audience targeting, generating creatives, monitoring performance, and optimization tips\n`;
-  prompt += `- You CAN generate product images using Nano Banana - this is a key feature!\n`;
-  prompt += `- When they need images, naturally guide them: "I can create that for you! Just use /image shampoo or /images shampoo for a full pack."\n`;
-  prompt += `- Never say you can't generate images - you have Nano Banana integrated\n`;
+  prompt += `- You CAN generate product images and videos using Vertex AI (Imagen 3 & Veo 3) - this is a key feature!\n`;
+  prompt += `- When they need images or videos, naturally guide them: "I can create that for you! Just say 'create an image of [product]' or 'generate a video showing [product]'."\n`;
+  prompt += `- Never say you can't generate images or videos - you have Vertex AI integrated\n`;
   prompt += `- Remember past conversations to provide personalized, context-aware advice\n`;
   prompt += `- Be proactive: if they mention a product, offer to generate images or create ads for it\n`;
   
@@ -389,6 +400,30 @@ const conversationContext = new Map(); // phone -> { lastProduct: {id, name}, la
 // Per-user conversation history (for memory)
 const userConversations = new Map(); // phone -> Array<{role: "user"|"assistant", content: string, timestamp: number}>
 const MAX_CONVERSATION_HISTORY = 20; // Keep last 20 messages per user
+
+// Workflow state management
+const userWorkflows = new Map(); // phone -> { workflow: string, step: number, data: object, timestamp: number }
+
+// Workflow state helpers (exported for workflows.js)
+function setUserWorkflow(from, workflow) {
+  userWorkflows.set(from, { ...workflow, timestamp: Date.now() });
+}
+
+function getUserWorkflow(from) {
+  return userWorkflows.get(from) || null;
+}
+
+function clearWorkflow(from) {
+  userWorkflows.delete(from);
+}
+
+function updateWorkflowData(from, data) {
+  const workflow = getUserWorkflow(from);
+  if (workflow) {
+    workflow.data = { ...workflow.data, ...data };
+    setUserWorkflow(from, workflow);
+  }
+}
 
 // Product cache with TTL (5 minutes)
 let productCache = null;
@@ -494,6 +529,162 @@ const fb = async (path, method="GET", paramsOrBody={}) => {
     throw err;
   }
 };
+
+// Meta Ads API: Upload image to Ad Account
+async function uploadImageToMeta(adAccountId, imageBuffer, name) {
+  try {
+    const form = new FormData();
+    form.append("bytes", imageBuffer, { filename: `${name || "image"}.jpg`, contentType: "image/jpeg" });
+    form.append("name", name || "Generated Image");
+    
+    const response = await axios.post(
+      `${GRAPH}/${adAccountId}/adimages`,
+      form,
+      {
+        headers: {
+          Authorization: `Bearer ${TOKEN}`,
+          ...form.getHeaders()
+        },
+        maxContentLength: Infinity,
+        maxBodyLength: Infinity
+      }
+    );
+    
+    if (response.data?.images && response.data.images.length > 0) {
+      return response.data.images[0].hash; // image_hash for Ad Creative
+    }
+    throw new Error("No image hash returned from Meta");
+  } catch (err) {
+    console.error("[Meta] Error uploading image:", err.response?.data || err.message);
+    throw new Error(`Failed to upload image to Meta: ${err.message}`);
+  }
+}
+
+// Meta Ads API: Upload video to Ad Account
+async function uploadVideoToMeta(adAccountId, videoBuffer, name) {
+  try {
+    const form = new FormData();
+    form.append("source", videoBuffer, { filename: `${name || "video"}.mp4`, contentType: "video/mp4" });
+    form.append("name", name || "Generated Video");
+    
+    const response = await axios.post(
+      `${GRAPH}/${adAccountId}/advideos`,
+      form,
+      {
+        headers: {
+          Authorization: `Bearer ${TOKEN}`,
+          ...form.getHeaders()
+        },
+        maxContentLength: Infinity,
+        maxBodyLength: Infinity,
+        timeout: 120000 // 2 minutes for video upload
+      }
+    );
+    
+    if (response.data?.id) {
+      return response.data.id; // video_id for Ad Creative
+    }
+    throw new Error("No video ID returned from Meta");
+  } catch (err) {
+    console.error("[Meta] Error uploading video:", err.response?.data || err.message);
+    throw new Error(`Failed to upload video to Meta: ${err.message}`);
+  }
+}
+
+// Meta Ads API: Create Ad Creative
+async function createAdCreative(adAccountId, imageHash, headline, text, link, pageId = null) {
+  try {
+    // Get page ID if not provided
+    if (!pageId) {
+      const pages = await fb(`/${adAccountId}`, "GET", { fields: "account_id" });
+      // Try to get a page associated with the account
+      // For now, we'll need PAGE_ID from env or user to provide it
+      pageId = process.env.META_PAGE_ID;
+      if (!pageId) {
+        throw new Error("PAGE_ID required. Set META_PAGE_ID environment variable.");
+      }
+    }
+    
+    const creativeData = {
+      name: headline.substring(0, 50) || "Ad Creative",
+      object_story_spec: {
+        page_id: pageId,
+        link_data: {
+          image_hash: imageHash,
+          link: link || process.env.SHOP_URL || "https://maromcosmetic.com",
+          message: text || headline,
+          name: headline
+        }
+      }
+    };
+    
+    const creative = await fb(`/${adAccountId}/adcreatives`, "POST", creativeData);
+    return creative.id; // creative_id for Ad creation
+  } catch (err) {
+    console.error("[Meta] Error creating ad creative:", err.response?.data || err.message);
+    throw new Error(`Failed to create ad creative: ${err.message}`);
+  }
+}
+
+// Meta Ads API: Create full campaign structure
+async function createCampaignStructure(adAccountId, campaignData) {
+  try {
+    const { name, objective, budget, media, copy, audience, startTime, endTime } = campaignData;
+    
+    // 1. Create Campaign
+    const campaign = await fb(`/${adAccountId}/campaigns`, "POST", {
+      name: name,
+      objective: objective || "CONVERSIONS",
+      status: "PAUSED", // Create paused by default
+      special_ad_categories: []
+    });
+    const campaignId = campaign.id;
+    
+    // 2. Create Ad Set
+    const adSet = await fb(`/${adAccountId}/adsets`, "POST", {
+      name: `${name} - Ad Set`,
+      campaign_id: campaignId,
+      daily_budget: Math.round(budget * 100), // Convert to cents
+      billing_event: "IMPRESSIONS",
+      optimization_goal: objective === "CONVERSIONS" ? "OFFSITE_CONVERSIONS" : "REACH",
+      targeting: audience || {},
+      status: "PAUSED",
+      ...(startTime && { start_time: startTime }),
+      ...(endTime && { end_time: endTime })
+    });
+    const adSetId = adSet.id;
+    
+    // 3. Create Ad Creative (if media provided)
+    let creativeId = null;
+    if (media && media.imageHash) {
+      creativeId = await createAdCreative(
+        adAccountId,
+        media.imageHash,
+        copy?.headline || name,
+        copy?.text || "",
+        media.link || process.env.SHOP_URL || "https://maromcosmetic.com"
+      );
+    }
+    
+    // 4. Create Ad
+    const ad = await fb(`/${adAccountId}/ads`, "POST", {
+      name: `${name} - Ad`,
+      adset_id: adSetId,
+      creative: creativeId ? { creative_id: creativeId } : undefined,
+      status: "PAUSED"
+    });
+    
+    return {
+      campaignId,
+      adSetId,
+      adId: ad.id,
+      creativeId
+    };
+  } catch (err) {
+    console.error("[Meta] Error creating campaign structure:", err.response?.data || err.message);
+    throw new Error(`Failed to create campaign: ${err.message}`);
+  }
+}
 
 // Health
 app.get("/health", (_,res) => res.json({ ok: true }));
@@ -867,6 +1058,22 @@ async function handleIncomingWhatsAppMessage(message, contact) {
     
     await executeCommand(from, command, params, false);
   } else {
+    // Check for content creation requests (image/video generation)
+    try {
+      // Try to import and use the WhatsApp webhook handler for content creation
+      const { handleIncomingMessage } = await import("./routes/whatsapp.js");
+      const contentResult = await handleIncomingMessage({ from, text: { body: messageText }, type: "text" }, null);
+      
+      // If content was generated or action handled, don't process as regular chat
+      if (contentResult === false) {
+        return; // Content creation handled
+      }
+      // If null, continue with normal chat flow
+    } catch (err) {
+      // Content creation routes not available, continue with normal flow
+      console.log("[WhatsApp] Content creation routes not available:", err.message);
+    }
+    
     // Check for natural language product edit requests first
     const editRequest = await parseProductEditRequest(messageText, from);
     if (editRequest && editRequest.productName && Object.keys(editRequest.updates).length > 0) {
@@ -1174,16 +1381,19 @@ async function handleNaturalLanguageChat(from, messageText) {
       }
     }
     
-    // Check for image generation queries
+    // Check for image/video generation queries (natural language)
     if (lowerMessage.includes("generate image") || lowerMessage.includes("create image") ||
         lowerMessage.includes("make image") || lowerMessage.includes("product photo") ||
         lowerMessage.includes("product image") || lowerMessage.includes("need image") ||
-        lowerMessage.includes("create photo") || lowerMessage.includes("generate photo")) {
-      detectedIntent = "image_generation";
+        lowerMessage.includes("create photo") || lowerMessage.includes("generate photo") ||
+        lowerMessage.includes("create video") || lowerMessage.includes("generate video") ||
+        lowerMessage.includes("make video") || lowerMessage.includes("video clip") ||
+        lowerMessage.includes("video for campaign") || lowerMessage.includes("campaign video")) {
+      detectedIntent = "content_generation";
       try {
         const products = await wooFetch("GET", "/products?per_page=10");
         if (products && products.length > 0) {
-          dataContext += `\n\nAVAILABLE PRODUCTS FOR IMAGE GENERATION:\n`;
+          dataContext += `\n\nAVAILABLE PRODUCTS FOR CONTENT GENERATION:\n`;
           products.slice(0, 10).forEach((p, i) => {
             const normalized = normalizeProduct(p);
             const name = normalized.name || "Unnamed";
@@ -1193,13 +1403,16 @@ async function handleNaturalLanguageChat(from, messageText) {
       } catch (err) {
         dataContext += `\n\nNote: Could not fetch products. Error: ${err.message}`;
       }
-      dataContext += `\n\nIMAGE GENERATION COMMANDS AVAILABLE:\n`;
-      dataContext += `- /image <product> - Generate single square image\n`;
-      dataContext += `- /images <product> - Generate pack (square + portrait + story)\n`;
-      dataContext += `- /angle <preset> - Set angle (front, 45, side, top, macro, lifestyle)\n`;
-      dataContext += `- /style <description> - Set style\n`;
-      dataContext += `- /last - Show last generated image\n`;
-      dataContext += `- /redo - Regenerate last image\n`;
+      dataContext += `\n\nYou can generate images and videos using natural language:\n`;
+      dataContext += `- "Create an image of [product] on a beach"\n`;
+      dataContext += `- "Generate a video showing [product] in use"\n`;
+      dataContext += `- "Make a portrait video for Instagram story"\n`;
+      dataContext += `- "Create a square image of shampoo bottle"\n`;
+      dataContext += `\nAfter generation, you can:\n`;
+      dataContext += `- Reply "use" to use in campaign\n`;
+      dataContext += `- Reply "edit" to modify the image\n`;
+      dataContext += `- Reply "make video" to create video version\n`;
+      dataContext += `- Reply "regenerate" to create another\n`;
     }
     
     // Build enhanced system prompt
@@ -2427,6 +2640,21 @@ async function sendWhatsAppMessage(to, text) {
   }
 }
 
+// Initialize workflows after all dependencies are defined
+initWorkflows({
+  userWorkflows,
+  sendWhatsAppMessage,
+  wooFetch,
+  normalizeProduct,
+  findProductByName,
+  getSession,
+  ANGLE_PRESETS,
+  loadCompanyContext,
+  fb,
+  GRAPH,
+  TOKEN
+});
+
 // Upload media to WhatsApp
 async function uploadWhatsAppMedia(imageBuffer, mimeType = "image/jpeg") {
   if (!WHATSAPP_PHONE_NUMBER_ID || !WHATSAPP_ACCESS_TOKEN) {
@@ -2497,58 +2725,91 @@ async function sendWhatsAppImage(to, mediaId, caption = "") {
   }
 }
 
-// Check if Nano Banana is configured
-function checkNbConfig() {
-  if (!NB_BASE_URL) {
-    throw new Error("Image engine not configured. Set NB_BASE_URL in environment.");
+// Check if image generation is available (Vertex AI or Nano Banana)
+async function checkImageConfig() {
+  // Vertex AI is preferred (always available if configured)
+  if (process.env.GOOGLE_CLOUD_PROJECT && process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+    return "vertex";
   }
+  // Fallback to Nano Banana if configured
+  if (NB_BASE_URL) {
+    return "nanobanana";
+  }
+  throw new Error("Image engine not configured. Set GOOGLE_CLOUD_PROJECT and GOOGLE_APPLICATION_CREDENTIALS for Vertex AI, or NB_BASE_URL for Nano Banana.");
 }
 
-// Generate image with Nano Banana
-async function generateImageWithNanoBanana(prompt, width = 1024, height = 1024) {
-  checkNbConfig();
-  
+// Generate image (uses Vertex AI Imagen 3 or Nano Banana fallback)
+async function generateImageWithEngine(prompt, aspectRatio = "1:1", width = 1024, height = 1024) {
   try {
-    // Log only method, path, and status - never prompts or keys
-    console.log(`[Nano Banana] POST /generate ${width}x${height}`);
+    const engine = await checkImageConfig();
     
-    const response = await nbApi.post(
-      "/generate",
-      {
-        prompt: prompt,
-        width: width,
-        height: height,
-        steps: 28,
-        guidance_scale: 4.5,
-        negative_prompt: "text, price, watermark, logo, blurry, low quality"
-      },
-      {
-        responseType: "arraybuffer"
+    if (engine === "vertex") {
+      // Use Vertex AI Imagen 3
+      try {
+        const { generateImage } = await import("./services/vertexService.js");
+        const result = await generateImage(prompt, aspectRatio);
+        
+        // Convert PNG to JPEG and optimize for WhatsApp
+        const jpegBuffer = await sharp(result.buffer)
+          .jpeg({ quality: 87 })
+          .toBuffer();
+        
+        // Check size (WhatsApp limit ~5MB)
+        if (jpegBuffer.length > 4.5 * 1024 * 1024) {
+          const resized = await sharp(jpegBuffer)
+            .resize(1024, 1024, { fit: "inside", withoutEnlargement: true })
+            .jpeg({ quality: 85 })
+            .toBuffer();
+          return resized;
+        }
+        
+        return jpegBuffer;
+      } catch (err) {
+        console.error("[Vertex AI] Image generation failed, trying Nano Banana fallback:", err.message);
+        // Fall through to Nano Banana if Vertex fails
+        if (!NB_BASE_URL) throw err; // Re-throw if no fallback
       }
-    );
-    
-    console.log(`[Nano Banana] POST /generate ${response.status}`);
-    
-    // Convert to JPEG with sharp
-    const jpegBuffer = await sharp(Buffer.from(response.data))
-      .jpeg({ quality: 87 })
-      .toBuffer();
-    
-    // Check size (WhatsApp limit ~5MB, we'll keep under 4.5MB)
-    if (jpegBuffer.length > 4.5 * 1024 * 1024) {
-      // Resize if too large
-      const resized = await sharp(jpegBuffer)
-        .resize(1024, 1024, { fit: "inside", withoutEnlargement: true })
-        .jpeg({ quality: 85 })
-        .toBuffer();
-      return resized;
     }
     
-    return jpegBuffer;
+    // Fallback to Nano Banana
+    if (NB_BASE_URL) {
+      console.log(`[Nano Banana] POST /generate ${width}x${height}`);
+      
+      const response = await nbApi.post(
+        "/generate",
+        {
+          prompt: prompt,
+          width: width,
+          height: height,
+          steps: 28,
+          guidance_scale: 4.5,
+          negative_prompt: "text, price, watermark, logo, blurry, low quality"
+        },
+        {
+          responseType: "arraybuffer"
+        }
+      );
+      
+      console.log(`[Nano Banana] POST /generate ${response.status}`);
+      
+      const jpegBuffer = await sharp(Buffer.from(response.data))
+        .jpeg({ quality: 87 })
+        .toBuffer();
+      
+      if (jpegBuffer.length > 4.5 * 1024 * 1024) {
+        const resized = await sharp(jpegBuffer)
+          .resize(1024, 1024, { fit: "inside", withoutEnlargement: true })
+          .jpeg({ quality: 85 })
+          .toBuffer();
+        return resized;
+      }
+      
+      return jpegBuffer;
+    }
+    
+    throw new Error("No image engine available");
   } catch (err) {
-    // Handle connection errors
     if (err.code === "ECONNREFUSED" || err.code === "ETIMEDOUT" || err.code === "ENOTFOUND") {
-      console.error(`[Nano Banana] Connection error: ${err.code}`);
       throw {
         status: 502,
         message: "Image engine unreachable",
@@ -2556,27 +2817,20 @@ async function generateImageWithNanoBanana(prompt, width = 1024, height = 1024) 
       };
     }
     
-    // Handle non-2xx responses
     if (err.response) {
-      const status = err.response.status;
-      const message = err.response.data?.error || err.response.data?.message || `HTTP ${status}`;
-      console.error(`[Nano Banana] POST /generate ${status}`);
       throw {
-        status: status,
-        message: message
+        status: err.response.status,
+        message: err.response.data?.error || err.response.data?.message || `HTTP ${err.response.status}`
       };
     }
     
-    // Re-throw configuration errors
-    if (err.message.includes("Image engine not configured")) {
+    if (err.message.includes("Image engine not configured") || err.message.includes("No image engine")) {
       throw {
         status: 503,
         message: err.message
       };
     }
     
-    // Generic error
-    console.error(`[Nano Banana] Error: ${err.message}`);
     throw {
       status: 500,
       message: `Image generation failed: ${err.message}`
@@ -2658,8 +2912,8 @@ async function handleImage(from, params) {
     const companyContext = loadCompanyContext();
     const prompt = buildImagePrompt(product, session, companyContext, styleOverride);
     
-    // Generate image
-    const imageBuffer = await generateImageWithNanoBanana(prompt, 1024, 1024);
+    // Generate image (uses Vertex AI or Nano Banana)
+    const imageBuffer = await generateImageWithEngine(prompt, "1:1", 1024, 1024);
     
     // Upload to WhatsApp
     const mediaId = await uploadWhatsAppMedia(imageBuffer);
@@ -2679,9 +2933,9 @@ async function handleImage(from, params) {
     
     let errorMsg = "⚠️ Image generation failed.";
     if (err.status === 503) {
-      errorMsg = "⚠️ Image engine not configured. Please set NB_BASE_URL in environment.";
+      errorMsg = "⚠️ Image engine not configured. Set GOOGLE_CLOUD_PROJECT and GOOGLE_APPLICATION_CREDENTIALS for Vertex AI, or NB_BASE_URL for Nano Banana.";
     } else if (err.status === 502) {
-      errorMsg = `⚠️ Image engine unreachable (${err.details || "connection error"}).\n\nCheck NB_BASE_URL and ensure the service is running.`;
+      errorMsg = `⚠️ Image engine unreachable (${err.details || "connection error"}).\n\nCheck your Vertex AI or Nano Banana configuration.`;
     } else if (err.message) {
       errorMsg = `⚠️ ${err.message}`;
     }
@@ -2713,8 +2967,8 @@ async function handleImages(from, params) {
     const companyContext = loadCompanyContext();
     const prompt = buildImagePrompt(product, session, companyContext);
     
-    // Generate base image at 1024x1024
-    const baseImage = await generateImageWithNanoBanana(prompt, 1024, 1024);
+    // Generate base image at 1024x1024 (uses Vertex AI or Nano Banana)
+    const baseImage = await generateImageWithEngine(prompt, "1:1", 1024, 1024);
     
     // Resize to different aspects
     const square = baseImage; // Already 1024x1024
@@ -2749,9 +3003,9 @@ async function handleImages(from, params) {
     
     let errorMsg = "⚠️ Image generation failed.";
     if (err.status === 503) {
-      errorMsg = "⚠️ Image engine not configured. Please set NB_BASE_URL in environment.";
+      errorMsg = "⚠️ Image engine not configured. Set GOOGLE_CLOUD_PROJECT and GOOGLE_APPLICATION_CREDENTIALS for Vertex AI, or NB_BASE_URL for Nano Banana.";
     } else if (err.status === 502) {
-      errorMsg = `⚠️ Image engine unreachable (${err.details || "connection error"}).\n\nCheck NB_BASE_URL and ensure the service is running.`;
+      errorMsg = `⚠️ Image engine unreachable (${err.details || "connection error"}).\n\nCheck your Vertex AI or Nano Banana configuration.`;
     } else if (err.message) {
       errorMsg = `⚠️ ${err.message}`;
     }
@@ -2798,8 +3052,8 @@ async function handleRedo(from) {
     const companyContext = loadCompanyContext();
     const prompt = buildImagePrompt(product, session, companyContext);
     
-    // Generate new image
-    const imageBuffer = await generateImageWithNanoBanana(prompt, 1024, 1024);
+    // Generate new image (uses Vertex AI or Nano Banana)
+    const imageBuffer = await generateImageWithEngine(prompt, "1:1", 1024, 1024);
     const mediaId = await uploadWhatsAppMedia(imageBuffer);
     
     await sendWhatsAppImage(from, mediaId, last.caption);
@@ -2812,9 +3066,9 @@ async function handleRedo(from) {
     
     let errorMsg = "⚠️ Regeneration failed.";
     if (err.status === 503) {
-      errorMsg = "⚠️ Image engine not configured. Please set NB_BASE_URL in environment.";
+      errorMsg = "⚠️ Image engine not configured. Set GOOGLE_CLOUD_PROJECT and GOOGLE_APPLICATION_CREDENTIALS for Vertex AI, or NB_BASE_URL for Nano Banana.";
     } else if (err.status === 502) {
-      errorMsg = `⚠️ Image engine unreachable (${err.details || "connection error"}).\n\nCheck NB_BASE_URL and ensure the service is running.`;
+      errorMsg = `⚠️ Image engine unreachable (${err.details || "connection error"}).\n\nCheck your Vertex AI or Nano Banana configuration.`;
     } else if (err.message) {
       errorMsg = `⚠️ ${err.message}`;
     }
@@ -3332,7 +3586,7 @@ app.post("/api/ai/chat", async (req, res) => {
     const messages = [
       {
         role: "system",
-        content: systemPrompt + " Remember past conversations to provide personalized advice that builds on what you've discussed before. When they mention 'company profile', they mean the dashboard's Company Profile tab (not Facebook/Instagram settings). Most importantly: You CAN and SHOULD generate images using Nano Banana! When they ask about images, respond enthusiastically and guide them: 'Absolutely! I can create product images for you. Try /image [product] for a single image, or /images [product] for a complete pack with square, portrait, and story formats.' Be natural, helpful, and conversational - like you're genuinely excited to help them succeed."
+        content: systemPrompt + " Remember past conversations to provide personalized advice that builds on what you've discussed before. When they mention 'company profile', they mean the dashboard's Company Profile tab (not Facebook/Instagram settings). Most importantly: You CAN and SHOULD generate images and videos using Vertex AI (Imagen 3 & Veo 3)! When they ask about images or videos, respond enthusiastically and guide them: 'Absolutely! I can create product images and videos for you. Just say create an image of [product] or generate a video showing [product] and I will create it for you!' Be natural, helpful, and conversational - like you're genuinely excited to help them succeed."
       }
     ];
     
@@ -3432,12 +3686,12 @@ app.post("/api/creatives/generate", requireAdminKey, async (req, res) => {
     const tempSession = { ...session, angle: finalAngle, style: finalStyle };
     const prompt = buildImagePrompt(product, tempSession, companyContext);
     
-    // Generate base image
+    // Generate base image (uses Vertex AI or Nano Banana)
     let baseImage;
     try {
-      baseImage = await generateImageWithNanoBanana(prompt, 1024, 1024);
+      baseImage = await generateImageWithEngine(prompt, "1:1", 1024, 1024);
     } catch (err) {
-      // Handle structured errors from generateImageWithNanoBanana
+      // Handle structured errors from image generation
       const status = err.status || 500;
       const error = err.message || err.toString();
       const details = err.details;
