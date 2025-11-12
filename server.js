@@ -148,12 +148,65 @@ async function wooFetch(method, endpoint, body = null) {
 }
 
 // Normalize WooCommerce product to standard format
+// Extract WooCommerce store base URL (e.g., https://maromcosmetic.com from https://maromcosmetic.com/wp-json/wc/v3/products)
+function getWooCommerceStoreUrl() {
+  if (!WC_API_URL) return null;
+  try {
+    const url = new URL(WC_API_URL);
+    return `${url.protocol}//${url.host}`;
+  } catch (e) {
+    // Fallback: try to extract domain manually
+    const match = WC_API_URL.match(/https?:\/\/([^\/]+)/);
+    return match ? `${match[0]}` : null;
+  }
+}
+
 function normalizeProduct(wcProduct) {
+  // Extract image URL from WooCommerce product
+  // WooCommerce images can be: {src: "...", url: "...", full: {...}, thumbnail: {...}, etc.}
+  function getImageUrl(img) {
+    if (!img) return null;
+    // Prefer full-size image, fallback to src, then url
+    if (img.full && img.full.src) return img.full.src;
+    if (img.src) return img.src;
+    if (img.url) return img.url;
+    // Handle string directly
+    if (typeof img === 'string') return img;
+    return null;
+  }
+  
+  // Ensure image URLs are absolute
+  function ensureAbsoluteUrl(url) {
+    if (!url) return null;
+    // Already absolute
+    if (url.startsWith('http://') || url.startsWith('https://')) return url;
+    // Protocol-relative
+    if (url.startsWith('//')) {
+      const storeUrl = getWooCommerceStoreUrl();
+      return storeUrl ? `${storeUrl.match(/https?:/)?.[0] || 'https:'}${url}` : url;
+    }
+    // Relative URL - make absolute
+    const storeUrl = getWooCommerceStoreUrl();
+    if (storeUrl) {
+      return url.startsWith('/') ? `${storeUrl}${url}` : `${storeUrl}/${url}`;
+    }
+    return url;
+  }
+  
+  const primaryImage = wcProduct.images && wcProduct.images.length > 0 
+    ? ensureAbsoluteUrl(getImageUrl(wcProduct.images[0]))
+    : null;
+  
+  const allImages = (wcProduct.images || [])
+    .map(img => ensureAbsoluteUrl(getImageUrl(img)))
+    .filter(Boolean);
+  
   return {
     id: wcProduct.id,
     name: wcProduct.name || "",
     sku: wcProduct.sku || "",
-    price: wcProduct.price || "0",
+    price: wcProduct.price || wcProduct.regular_price || "0",
+    regular_price: wcProduct.regular_price || null,
     sale_price: wcProduct.sale_price || null,
     stock_status: wcProduct.stock_status || "instock",
     stock_quantity: wcProduct.stock_quantity || null,
@@ -161,8 +214,10 @@ function normalizeProduct(wcProduct) {
       id: cat.id,
       name: cat.name
     })),
-    image: wcProduct.images && wcProduct.images[0] ? wcProduct.images[0].src : null,
-    images: (wcProduct.images || []).map(img => img.src),
+    image: primaryImage,
+    images: allImages,
+    // Keep full image objects for frontend flexibility
+    images_full: wcProduct.images || [],
     permalink: wcProduct.permalink || "",
     status: wcProduct.status || "publish",
     description: wcProduct.description || "",
@@ -3980,8 +4035,110 @@ async function handleRedo(from) {
 
 // 1) List ad accounts
 app.get("/api/adaccounts", async (_,res) => {
-  try { res.json(await fb(`/me/adaccounts`, "GET", { fields: "id,account_id,name,currency" })); }
+  try { res.json(await fb(`/me/adaccounts`, "GET", { fields: "id,account_id,name,currency,status" })); }
   catch(e){ res.status(500).json(e.response?.data || { error:String(e) }); }
+});
+
+// Get campaigns for a specific ad account
+app.get("/api/adaccounts/:actId/campaigns", async (req, res) => {
+  try {
+    const accountId = req.params.actId;
+    const campaigns = await fb(`/${accountId}/campaigns`, "GET", {
+      fields: "id,name,status,objective,created_time,updated_time",
+      limit: 100
+    });
+    res.json({
+      success: true,
+      campaigns: campaigns.data || [],
+      count: campaigns.data ? campaigns.data.length : 0
+    });
+  } catch (e) {
+    res.status(500).json(e.response?.data || { error: String(e) });
+  }
+});
+
+// Get account details with campaigns
+app.get("/api/adaccounts/:actId/details", async (req, res) => {
+  try {
+    const accountId = req.params.actId;
+    
+    if (!accountId) {
+      return res.status(400).json({ success: false, error: "Account ID is required" });
+    }
+    
+    // Get account info
+    let account = null;
+    try {
+      account = await fb(`/${accountId}`, "GET", {
+        fields: "id,account_id,name,currency,status,timezone_name"
+      });
+    } catch (accountErr) {
+      console.error(`[Account Details] Error fetching account ${accountId}:`, accountErr.message);
+      // If account fetch fails, try to get basic info from adaccounts list
+      try {
+        const accounts = await fb(`/me/adaccounts`, "GET", { fields: "id,account_id,name,currency,status" });
+        const foundAccount = accounts.data?.find(a => (a.id || a.account_id) === accountId);
+        if (foundAccount) {
+          account = foundAccount;
+        } else {
+          throw accountErr; // Re-throw if not found
+        }
+      } catch (fallbackErr) {
+        return res.status(404).json({ 
+          success: false, 
+          error: `Account not found: ${accountId}`,
+          details: accountErr.message || fallbackErr.message
+        });
+      }
+    }
+    
+    // Get campaigns
+    let campaigns = [];
+    try {
+      const campaignsResponse = await fb(`/${accountId}/campaigns`, "GET", {
+        fields: "id,name,status,objective,created_time,updated_time",
+        limit: 100
+      });
+      campaigns = campaignsResponse.data || [];
+    } catch (campaignErr) {
+      console.error(`[Campaigns] Error fetching campaigns for ${accountId}:`, campaignErr.message);
+      // Don't fail the whole request if campaigns can't be fetched
+    }
+    
+    // Get insights if available
+    let insights = null;
+    try {
+      const insightsResponse = await fb(`/${accountId}/insights`, "GET", {
+        date_preset: "last_7d",
+        fields: "spend,impressions,clicks,ctr,cpc,cpm"
+      });
+      insights = insightsResponse.data && insightsResponse.data[0] ? insightsResponse.data[0] : null;
+    } catch (insightsErr) {
+      console.error(`[Insights] Error fetching insights for ${accountId}:`, insightsErr.message);
+      // Don't fail the whole request if insights can't be fetched
+    }
+    
+    res.json({
+      success: true,
+      account: account,
+      campaigns: campaigns,
+      campaignCount: campaigns.length,
+      activeCampaigns: campaigns.filter(c => c.status === "ACTIVE").length,
+      pausedCampaigns: campaigns.filter(c => c.status === "PAUSED").length,
+      insights: insights
+    });
+  } catch (e) {
+    console.error(`[Account Details] Error for account ${req.params.actId}:`, e);
+    const status = e.response?.status || 500;
+    const errorData = e.response?.data || {};
+    const errorMessage = errorData.error?.message || errorData.error || e.message || String(e);
+    
+    res.status(status).json({ 
+      success: false,
+      error: errorMessage,
+      details: errorData.error?.error_subcode || errorData.error_subcode || null
+    });
+  }
 });
 
 // 2) Insights (last 7d)
@@ -4687,6 +4844,128 @@ app.get("/api/creatives/last", requireAdminKey, (req, res) => {
     res.json({ ok: true, items: last });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Video generation endpoint
+app.post("/api/creatives/video", requireAdminKey, async (req, res) => {
+  try {
+    const { productQuery, prompt, aspectRatio = "9:16", durationSec = 8, phone = "dashboard" } = req.body;
+    
+    if (!productQuery && !prompt) {
+      return res.status(400).json({ ok: false, error: "productQuery or prompt is required" });
+    }
+    
+    const companyContext = loadCompanyContext();
+    let enhancedPrompt = prompt;
+    let product = null;
+    
+    // If productQuery is provided, find product and enhance prompt
+    if (productQuery) {
+      product = await findProductByName(productQuery);
+      if (!product) {
+        return res.status(404).json({ ok: false, error: `Product not found: ${productQuery}` });
+      }
+      
+      // Build enhanced prompt with company profile context
+      const basePrompt = prompt || `UGC style video showcasing ${product.name}, natural lighting, authentic feel`;
+      
+      // Enhance with company profile
+      const contextParts = [];
+      if (companyContext.brandTone) {
+        contextParts.push(`Brand tone: ${companyContext.brandTone}`);
+      }
+      if (companyContext.targetAudience) {
+        contextParts.push(`Target audience: ${companyContext.targetAudience}`);
+      }
+      if (companyContext.description) {
+        const brandDesc = companyContext.description.substring(0, 100);
+        contextParts.push(`Brand: ${brandDesc}`);
+      }
+      if (product.name) {
+        contextParts.push(`Featuring: ${product.name}`);
+      }
+      if (product.short_description) {
+        const desc = product.short_description.substring(0, 100);
+        contextParts.push(`Product highlights: ${desc}`);
+      }
+      contextParts.push("UGC style, authentic user-generated content feel");
+      
+      enhancedPrompt = contextParts.join(". ") + ". " + basePrompt;
+    } else if (prompt) {
+      // Enhance prompt with company profile even without product
+      const contextParts = [];
+      if (companyContext.brandTone) {
+        contextParts.push(`Brand tone: ${companyContext.brandTone}`);
+      }
+      if (companyContext.targetAudience) {
+        contextParts.push(`Target audience: ${companyContext.targetAudience}`);
+      }
+      if (companyContext.description) {
+        const brandDesc = companyContext.description.substring(0, 100);
+        contextParts.push(`Brand context: ${brandDesc}`);
+      }
+      
+      if (contextParts.length > 0) {
+        enhancedPrompt = contextParts.join(". ") + ". " + prompt;
+      }
+    }
+    
+    // Import video generation service
+    let generateVideo;
+    try {
+      const vertexModule = await import("./services/vertexService.js");
+      generateVideo = vertexModule.generateVideo;
+      if (!generateVideo) {
+        throw new Error("generateVideo function not found");
+      }
+    } catch (importErr) {
+      console.error("[Video Generation] Failed to import vertexService:", importErr.message);
+      return res.status(503).json({ 
+        ok: false, 
+        error: "Video generation service not available. Check Vertex AI configuration.",
+        details: importErr.message
+      });
+    }
+    
+    // Generate video
+    const productContext = product ? {
+      title: product.name,
+      shortDesc: product.description || product.short_description || "",
+      permalink: product.permalink || ""
+    } : null;
+    
+    const result = await generateVideo(enhancedPrompt, aspectRatio, durationSec, productContext);
+    
+    // Convert to base64 for preview
+    const videoBase64 = result.buffer.toString('base64');
+    const videoDataUrl = `data:${result.mimeType};base64,${videoBase64}`;
+    
+    // Save to history
+    const productName = product?.name || "Custom Video";
+    const caption = `${productName} • Video • ${aspectRatio} • ${durationSec}s`;
+    addToHistory(phone, "video", caption, productName, null, null);
+    
+    console.log(`[Creatives API] Generated video for ${phone}: ${productName}, duration: ${durationSec}s`);
+    
+    res.json({ 
+      ok: true, 
+      video: {
+        dataUrl: videoDataUrl,
+        mimeType: result.mimeType,
+        aspectRatio,
+        durationSec,
+        model: result.model
+      },
+      prompt: enhancedPrompt,
+      product: product ? { name: product.name, id: product.id } : null
+    });
+    
+  } catch (err) {
+    console.error("[Creatives API] Video generation error:", err);
+    const status = err.status || 500;
+    const error = err.message || err.toString();
+    res.status(status).json({ ok: false, error });
   }
 });
 
