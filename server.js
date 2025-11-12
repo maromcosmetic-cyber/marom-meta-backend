@@ -4580,7 +4580,9 @@ app.post("/api/ai/creatives", async (req, res) => {
 // AI Audience Suggestions endpoint
 app.post("/api/ai/audience-suggestions", requireAdminKey, async (req, res) => {
   try {
+    console.log("[AI Audience] Request received");
     const companyContext = loadCompanyContext();
+    console.log("[AI Audience] Company context loaded:", companyContext.name || "N/A");
     
     // Build comprehensive company profile context
     let contextPrompt = `Company: ${companyContext.name || "MAROM"}\n`;
@@ -4669,6 +4671,7 @@ ${contextPrompt}
 
 Provide a well-targeted audience suggestion that would perform well for their campaigns.`;
 
+    console.log("[AI Audience] Calling OpenAI API...");
     const completion = await openaiWithFallback({
       model: "gpt-4o-mini",
       messages: [
@@ -4680,7 +4683,26 @@ Provide a well-targeted audience suggestion that would perform well for their ca
       max_tokens: 500
     });
     
-    const suggestion = JSON.parse(completion.choices[0].message.content);
+    console.log("[AI Audience] OpenAI response received");
+    
+    if (!completion || !completion.choices || !completion.choices[0] || !completion.choices[0].message) {
+      throw new Error("Invalid response from OpenAI API");
+    }
+    
+    const content = completion.choices[0].message.content;
+    if (!content) {
+      throw new Error("Empty response from OpenAI API");
+    }
+    
+    console.log("[AI Audience] Parsing JSON response...");
+    let suggestion;
+    try {
+      suggestion = JSON.parse(content);
+    } catch (parseErr) {
+      console.error("[AI Audience] JSON parse error:", parseErr);
+      console.error("[AI Audience] Raw content:", content);
+      throw new Error(`Failed to parse AI response: ${parseErr.message}`);
+    }
     
     // Validate and normalize the response
     const normalized = {
@@ -4697,7 +4719,7 @@ Provide a well-targeted audience suggestion that would perform well for their ca
       reasoning: suggestion.reasoning || "AI-generated suggestion based on company profile"
     };
     
-    console.log(`[AI Audience] Generated suggestion for ${companyContext.name || "company"}`);
+    console.log(`[AI Audience] Generated suggestion for ${companyContext.name || "company"}:`, normalized.name);
     
     res.json({
       success: true,
@@ -4705,9 +4727,11 @@ Provide a well-targeted audience suggestion that would perform well for their ca
     });
   } catch (err) {
     console.error("[AI Audience] Error:", err);
+    console.error("[AI Audience] Error stack:", err.stack);
     res.status(500).json({
       success: false,
-      error: err.message || "Failed to generate audience suggestions"
+      error: err.message || "Failed to generate audience suggestions",
+      details: process.env.NODE_ENV === 'development' ? err.stack : undefined
     });
   }
 });
