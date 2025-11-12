@@ -1657,21 +1657,92 @@ async function handleProduct(from, params) {
         return;
       }
       
-      // Update via WooCommerce API
+      // Build WooCommerce payload
       const updateData = {};
       if (updates.title) updateData.name = updates.title;
-      if (updates.price) updateData.regular_price = updates.price.toString();
+      if (updates.price) updateData.regular_price = String(updates.price);
       if (updates.description) updateData.description = updates.description;
       if (updates.short_description) updateData.short_description = updates.short_description;
       
-      await wooFetch("PUT", `/products/${product.id}`, updateData);
+      // Use direct axios call with proper WooCommerce API format (same as PUT endpoint)
+      const baseUrl = WC_API_URL.replace(/\/products.*$/, "");
+      const endpoint = `/products/${product.id}`;
+      const fullUrl = `${baseUrl}${endpoint}`;
       
-      let updateMsg = `✅ Updated ${product.name}:\n\n`;
-      Object.keys(updates).forEach(key => {
-        updateMsg += `• ${key}: ${updates[key]}\n`;
-      });
+      // Build query params for authentication
+      const params = new URLSearchParams();
+      params.append("consumer_key", WC_API_KEY || "");
+      params.append("consumer_secret", WC_API_SECRET || "");
       
-      await sendWhatsAppMessage(from, updateMsg);
+      const urlWithAuth = `${fullUrl}?${params.toString()}`;
+      
+      try {
+        console.log(`[WhatsApp] Updating product ${product.id} with data:`, JSON.stringify(updateData));
+        
+        const response = await axios.put(urlWithAuth, updateData, {
+          headers: {
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+          },
+          timeout: 15000
+        });
+        
+        console.log(`[WhatsApp] WooCommerce response status: ${response.status}`);
+        
+        // Verify success
+        if (response.status >= 200 && response.status < 300) {
+          // Fetch fresh product to confirm the change
+          const freshProduct = await wooFetch("GET", `/products/${product.id}`);
+          
+          let updateMsg = `✅ Updated product:\n\n`;
+          Object.keys(updates).forEach(key => {
+            const oldValue = key === "title" ? product.name : (product[key] || "N/A");
+            const newValue = updates[key];
+            updateMsg += `• ${key}: ${oldValue} → ${newValue}\n`;
+          });
+          
+          if (freshProduct && freshProduct.name) {
+            updateMsg += `\n📦 Confirmed: ${freshProduct.name}`;
+            if (freshProduct.regular_price) {
+              updateMsg += `\n💰 Price: $${freshProduct.regular_price}`;
+            }
+          }
+          
+          await sendWhatsAppMessage(from, updateMsg);
+        } else {
+          await sendWhatsAppMessage(from, `⚠️ Update returned status ${response.status}. Response: ${JSON.stringify(response.data).substring(0, 200)}`);
+        }
+      } catch (err) {
+        console.error("[WhatsApp] Product update error:", {
+          status: err.response?.status,
+          data: err.response?.data,
+          message: err.message,
+          url: urlWithAuth.replace(/consumer_key=[^&]+/, "consumer_key=***").replace(/consumer_secret=[^&]+/, "consumer_secret=***")
+        });
+        
+        let errorMsg = "❌ Failed to update product.";
+        if (err.response) {
+          const wooError = err.response.data;
+          const errorText = wooError.message || wooError.error || (typeof wooError === 'string' ? wooError : JSON.stringify(wooError));
+          errorMsg = `❌ WooCommerce error (${err.response.status}): ${errorText}`;
+          
+          // Provide helpful hints
+          if (err.response.status === 401) {
+            errorMsg += "\n\nCheck WC_API_KEY and WC_API_SECRET permissions.";
+          } else if (err.response.status === 404) {
+            errorMsg += `\n\nProduct ID ${product.id} not found in WooCommerce.`;
+          } else if (err.response.status === 400) {
+            errorMsg += "\n\nInvalid data format. Check field names and values.";
+          }
+        } else if (err.code === "ECONNREFUSED" || err.code === "ETIMEDOUT") {
+          errorMsg = `❌ Cannot connect to WooCommerce (${err.code}). Check WC_API_URL.`;
+        } else {
+          errorMsg = `❌ ${err.message}`;
+        }
+        
+        await sendWhatsAppMessage(from, errorMsg);
+      }
+      
       return;
     }
     
