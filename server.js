@@ -225,9 +225,35 @@ const pendingConfirmations = new Map(); // phone -> { command, params, timestamp
 
 // Helper
 const fb = async (path, method="GET", paramsOrBody={}) => {
+  if (!TOKEN) {
+    throw new Error("META_TOKEN not configured. Please set META_TOKEN in your .env file.");
+  }
+  
   const cfg = { url: `${GRAPH}${path}`, method, headers: { Authorization: `Bearer ${TOKEN}` } };
   if (method === "GET") cfg.params = paramsOrBody; else cfg.data = paramsOrBody;
-  const { data } = await axios(cfg); return data;
+  
+  try {
+    const { data } = await axios(cfg);
+    return data;
+  } catch (err) {
+    // Provide more helpful error messages
+    if (err.response) {
+      const errorData = err.response.data?.error || {};
+      const errorMsg = errorData.message || err.response.statusText || "Unknown error";
+      const errorCode = errorData.code || err.response.status;
+      
+      if (errorCode === 190 || errorMsg.includes("Invalid OAuth")) {
+        throw new Error("Invalid or expired access token. Please check your META_TOKEN.");
+      } else if (errorCode === 200 || errorMsg.includes("Permission denied")) {
+        throw new Error("Missing permissions. Please grant 'ads_read' and 'ads_management' permissions.");
+      } else if (errorCode === 10 || errorMsg.includes("Permission")) {
+        throw new Error("API access denied. Check your app permissions in Meta for Developers.");
+      } else {
+        throw new Error(`Meta API error (${errorCode}): ${errorMsg}`);
+      }
+    }
+    throw err;
+  }
 };
 
 // Health
@@ -381,44 +407,173 @@ async function handleIncomingWhatsAppMessage(message, contact) {
     
     await executeCommand(from, command, params, false);
   } else {
-    // Regular AI chat
-    try {
-      const companyContext = loadCompanyContext();
-      const pastConversations = loadConversations();
-      const systemPrompt = buildSystemPrompt(companyContext);
-      
-      const messages = [
-        {
-          role: "system",
-          content: systemPrompt + " You are helping via WhatsApp. Keep responses concise and conversational. When users mention 'company profile' or 'dashboard', they mean the MAROM Ads Copilot dashboard."
+    // Natural language AI chat with data integration
+    await handleNaturalLanguageChat(from, messageText);
+  }
+}
+
+// Handle natural language queries with real data integration
+async function handleNaturalLanguageChat(from, messageText) {
+  try {
+    const companyContext = loadCompanyContext();
+    const pastConversations = loadConversations();
+    const lowerMessage = messageText.toLowerCase();
+    
+    // Detect what the user is asking about
+    let dataContext = "";
+    let detectedIntent = null;
+    
+    // Check for campaign/stats queries
+    if (lowerMessage.includes("stat") || lowerMessage.includes("performance") || 
+        lowerMessage.includes("spend") || lowerMessage.includes("impression") ||
+        lowerMessage.includes("click") || lowerMessage.includes("ctr") ||
+        lowerMessage.includes("campaign") || lowerMessage.includes("ad performance")) {
+      detectedIntent = "stats";
+      try {
+        if (TOKEN) {
+          const accounts = await fb(`/me/adaccounts`, "GET", { fields: "id,account_id,name" });
+          if (accounts.data && accounts.data.length > 0) {
+            let totalSpend = 0, totalImpressions = 0, totalClicks = 0;
+            for (const account of accounts.data) {
+              try {
+                const insights = await fb(`/${account.id}/insights`, "GET", {
+                  date_preset: "last_7d",
+                  fields: "spend,impressions,clicks,ctr,cpc,cpm"
+                });
+                if (insights.data && insights.data[0]) {
+                  const d = insights.data[0];
+                  totalSpend += parseFloat(d.spend || 0);
+                  totalImpressions += parseInt(d.impressions || 0);
+                  totalClicks += parseInt(d.clicks || 0);
+                }
+              } catch (e) {
+                // Continue
+              }
+            }
+            const ctr = totalImpressions > 0 ? ((totalClicks / totalImpressions) * 100).toFixed(2) : "0.00";
+            const cpc = totalClicks > 0 ? (totalSpend / totalClicks).toFixed(2) : "0.00";
+            dataContext += `\n\nCURRENT CAMPAIGN DATA (Last 7 days):\n- Total Spend: $${totalSpend.toFixed(2)}\n- Impressions: ${totalImpressions.toLocaleString()}\n- Clicks: ${totalClicks.toLocaleString()}\n- CTR: ${ctr}%\n- CPC: $${cpc}`;
+          }
         }
-      ];
-      
-      if (pastConversations.length > 0) {
-        const recent = pastConversations.slice(-3);
-        messages.push({
-          role: "system",
-          content: `Previous conversation context: ${recent.map(c => `Q: ${c.user} A: ${c.assistant}`).join(" | ")}`
+      } catch (err) {
+        dataContext += `\n\nNote: Could not fetch campaign stats. Error: ${err.message}`;
+      }
+    }
+    
+    // Check for campaign list queries
+    if (lowerMessage.includes("list campaign") || lowerMessage.includes("show campaign") ||
+        lowerMessage.includes("my campaign") || lowerMessage.includes("all campaign")) {
+      detectedIntent = "campaigns";
+      try {
+        if (TOKEN) {
+          const accounts = await fb(`/me/adaccounts`, "GET", { fields: "id" });
+          if (accounts.data && accounts.data.length > 0) {
+            const campaigns = [];
+            for (const account of accounts.data) {
+              try {
+                const result = await fb(`/${account.id}/campaigns`, "GET", {
+                  fields: "id,name,status",
+                  limit: 20
+                });
+                if (result.data) campaigns.push(...result.data);
+              } catch (e) {
+                // Continue
+              }
+            }
+            if (campaigns.length > 0) {
+              const activeCount = campaigns.filter(c => c.status === "ACTIVE").length;
+              const pausedCount = campaigns.filter(c => c.status === "PAUSED").length;
+              dataContext += `\n\nCURRENT CAMPAIGNS:\n- Total: ${campaigns.length}\n- Active: ${activeCount}\n- Paused: ${pausedCount}\n\nRecent campaigns: ${campaigns.slice(0, 5).map(c => `${c.name} (${c.status})`).join(", ")}`;
+            }
+          }
+        }
+      } catch (err) {
+        dataContext += `\n\nNote: Could not fetch campaigns. Error: ${err.message}`;
+      }
+    }
+    
+    // Check for product queries
+    if (lowerMessage.includes("product") && !lowerMessage.includes("create")) {
+      detectedIntent = "products";
+      const products = loadProductsCache();
+      if (products.length > 0) {
+        dataContext += `\n\nAVAILABLE PRODUCTS (${products.length}):\n`;
+        products.slice(0, 5).forEach((p, i) => {
+          const name = p.name || p.title || "Unnamed";
+          const price = p.price ? `$${p.price}` : "N/A";
+          dataContext += `${i + 1}. ${name} - ${price}\n`;
+        });
+        
+        // Try to find specific product mentioned
+        const productMatch = messageText.match(/\b(shampoo|hair|treatment|product|cream|serum|oil|mask)\b/i);
+        if (productMatch) {
+          const foundProduct = findProductByName(productMatch[0]);
+          if (foundProduct) {
+            dataContext += `\n\nMATCHED PRODUCT DETAILS:\n- Name: ${foundProduct.name || foundProduct.title}\n- Price: ${foundProduct.price ? `$${foundProduct.price}` : "N/A"}\n- Description: ${(foundProduct.description || foundProduct.short_description || "").substring(0, 200)}`;
+          }
+        }
+      } else {
+        dataContext += `\n\nNote: No products cached. Use /sync products to fetch from website.`;
+      }
+    }
+    
+    // Check for ad creation queries
+    if (lowerMessage.includes("create ad") || lowerMessage.includes("make ad") ||
+        lowerMessage.includes("generate ad") || lowerMessage.includes("new campaign")) {
+      detectedIntent = "create_ad";
+      const products = loadProductsCache();
+      if (products.length > 0) {
+        dataContext += `\n\nAVAILABLE PRODUCTS FOR AD CREATION:\n`;
+        products.slice(0, 10).forEach((p, i) => {
+          const name = p.name || p.title || "Unnamed";
+          dataContext += `${i + 1}. ${name}\n`;
         });
       }
-      
-      messages.push({ role: "user", content: messageText });
-
-      const completion = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        messages: messages,
-        temperature: 0.7,
-        max_tokens: 500
-      });
-
-      const aiResponse = completion.choices[0].message.content;
-      saveConversation(messageText, aiResponse);
-      await sendWhatsAppMessage(from, aiResponse);
-      
-    } catch (err) {
-      console.error("Error processing WhatsApp message:", err);
-      await sendWhatsAppMessage(from, "⚠️ Couldn't complete action: " + err.message);
     }
+    
+    // Build enhanced system prompt
+    let systemPrompt = buildSystemPrompt(companyContext);
+    systemPrompt += "\n\nYou are helping via WhatsApp. Keep responses concise and conversational.";
+    systemPrompt += "\nYou have access to REAL campaign data, product data, and company profile.";
+    systemPrompt += "\nWhen users ask about stats, campaigns, or products, use the actual data provided below.";
+    systemPrompt += "\nIf data is not available, suggest using commands like /stats, /campaigns, or /products.";
+    systemPrompt += "\nFor campaign management actions, suggest using commands like /pause, /resume, /budget.";
+    
+    if (detectedIntent) {
+      systemPrompt += `\n\nUser intent detected: ${detectedIntent}`;
+    }
+    
+    const messages = [
+      {
+        role: "system",
+        content: systemPrompt + dataContext
+      }
+    ];
+    
+    if (pastConversations.length > 0) {
+      const recent = pastConversations.slice(-3);
+      messages.push({
+        role: "system",
+        content: `Previous conversation context: ${recent.map(c => `Q: ${c.user} A: ${c.assistant}`).join(" | ")}`
+      });
+    }
+    
+    messages.push({ role: "user", content: messageText });
+
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: messages,
+      temperature: 0.7,
+      max_tokens: 600
+    });
+
+    const aiResponse = completion.choices[0].message.content;
+    saveConversation(messageText, aiResponse);
+    await sendWhatsAppMessage(from, aiResponse);
+    
+  } catch (err) {
+    console.error("Error processing natural language chat:", err);
+    await sendWhatsAppMessage(from, "⚠️ Couldn't complete action: " + err.message);
   }
 }
 
@@ -541,6 +696,17 @@ async function executeCommand(from, command, params, confirmed = false) {
         }
         break;
         
+      case "/test":
+      case "/check":
+        if (params[0] === "api") {
+          result.success = true;
+          await handleTestApi(from);
+        } else {
+          await sendWhatsAppMessage(from, "⚠️ Usage: /test api");
+          result.error = "Invalid test target";
+        }
+        break;
+        
       default:
         await sendWhatsAppMessage(from, "⚠️ Unknown command. Type /help for command list.");
         result.error = "Unknown command";
@@ -554,12 +720,86 @@ async function executeCommand(from, command, params, confirmed = false) {
 }
 
 // Command handlers
+async function handleTestApi(from) {
+  try {
+    await sendWhatsAppMessage(from, "🔍 Testing Meta API access...");
+    
+    // Check if token is configured
+    if (!TOKEN) {
+      await sendWhatsAppMessage(from, 
+        "❌ META_TOKEN not configured.\n\n" +
+        "Please set META_TOKEN in your .env file.\n" +
+        "Get your token from:\n" +
+        "https://developers.facebook.com/tools/explorer/"
+      );
+      return;
+    }
+    
+    // Test basic API access
+    try {
+      const me = await fb(`/me`, "GET", { fields: "id,name" });
+      await sendWhatsAppMessage(from, `✅ API Connected!\n\nUser: ${me.name || me.id}\nID: ${me.id}`);
+    } catch (err) {
+      await sendWhatsAppMessage(from, `❌ API Connection Failed:\n\n${err.message}\n\nCheck your META_TOKEN.`);
+      return;
+    }
+    
+    // Test ad accounts access
+    try {
+      const accounts = await fb(`/me/adaccounts`, "GET", { fields: "id,account_id,name", limit: 1 });
+      
+      if (!accounts.data || accounts.data.length === 0) {
+        await sendWhatsAppMessage(from, 
+          "⚠️ No ad accounts found.\n\n" +
+          "You may need to:\n" +
+          "1. Create an ad account\n" +
+          "2. Grant 'ads_read' permission\n" +
+          "3. Link your ad account to your app"
+        );
+        return;
+      }
+      
+      const account = accounts.data[0];
+      await sendWhatsAppMessage(from, 
+        `✅ Ad Account Access OK!\n\n` +
+        `Account: ${account.name || account.account_id}\n` +
+        `ID: ${account.id}\n\n` +
+        `You can now use:\n` +
+        `/stats\n` +
+        `/campaigns\n` +
+        `/best`
+      );
+    } catch (err) {
+      await sendWhatsAppMessage(from, 
+        `❌ Ad Account Access Failed:\n\n${err.message}\n\n` +
+        `You may need 'ads_read' permission.\n` +
+        `Check: https://developers.facebook.com/apps/`
+      );
+    }
+  } catch (err) {
+    await sendWhatsAppMessage(from, `❌ Test failed: ${err.message}`);
+  }
+}
+
 async function handleStats(from, period) {
   try {
+    if (!TOKEN) {
+      await sendWhatsAppMessage(from, 
+        "❌ META_TOKEN not configured.\n\n" +
+        "Use /test api to diagnose.\n" +
+        "Set META_TOKEN in .env file."
+      );
+      return;
+    }
+    
     const accounts = await fb(`/me/adaccounts`, "GET", { fields: "id,account_id,name" });
     
     if (!accounts.data || accounts.data.length === 0) {
-      await sendWhatsAppMessage(from, "📊 No ad accounts found.");
+      await sendWhatsAppMessage(from, 
+        "📊 No ad accounts found.\n\n" +
+        "Use /test api to check access.\n" +
+        "You may need to create an ad account or grant permissions."
+      );
       return;
     }
     
@@ -607,10 +847,23 @@ async function handleStats(from, period) {
 
 async function handleCampaigns(from, filter) {
   try {
+    if (!TOKEN) {
+      await sendWhatsAppMessage(from, 
+        "❌ META_TOKEN not configured.\n\n" +
+        "Use /test api to diagnose.\n" +
+        "Set META_TOKEN in .env file."
+      );
+      return;
+    }
+    
     const accounts = await fb(`/me/adaccounts`, "GET", { fields: "id" });
     
     if (!accounts.data || accounts.data.length === 0) {
-      await sendWhatsAppMessage(from, "📊 No campaigns found.");
+      await sendWhatsAppMessage(from, 
+        "📊 No ad accounts found.\n\n" +
+        "Use /test api to check access.\n" +
+        "You may need to create an ad account or grant permissions."
+      );
       return;
     }
     
@@ -651,7 +904,26 @@ async function handleCampaigns(from, filter) {
 
 async function handleBest(from) {
   try {
+    if (!TOKEN) {
+      await sendWhatsAppMessage(from, 
+        "❌ META_TOKEN not configured.\n\n" +
+        "Use /test api to diagnose.\n" +
+        "Set META_TOKEN in .env file."
+      );
+      return;
+    }
+    
     const accounts = await fb(`/me/adaccounts`, "GET", { fields: "id" });
+    
+    if (!accounts.data || accounts.data.length === 0) {
+      await sendWhatsAppMessage(from, 
+        "📊 No ad accounts found.\n\n" +
+        "Use /test api to check access.\n" +
+        "You may need to create an ad account or grant permissions."
+      );
+      return;
+    }
+    
     const topCampaigns = [];
     
     for (const account of accounts.data || []) {
@@ -1129,6 +1401,8 @@ function getHelpMessage() {
     `*⚙️ AUTOMATION*\n` +
     `/report daily [HH:mm] - Schedule reports\n` +
     `/alerts on|off - Toggle alerts\n\n` +
+    `*🔧 DIAGNOSTICS*\n` +
+    `/test api - Check API connection\n\n` +
     `Type /help anytime for this list.`
   );
 }
