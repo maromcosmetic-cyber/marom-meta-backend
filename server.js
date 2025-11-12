@@ -4152,6 +4152,8 @@ app.post("/api/campaigns/create", requireAdminKey, async (req, res) => {
   try {
     const { accountId, name, objective, budget, audience, startDate, endDate } = req.body;
     
+    console.log('[Campaign Creation] Audience data:', audience);
+    
     if (!accountId) {
       return res.status(400).json({ success: false, error: "Account ID is required" });
     }
