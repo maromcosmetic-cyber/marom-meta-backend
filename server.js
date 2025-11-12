@@ -1493,14 +1493,163 @@ async function handleNaturalLanguageChat(from, messageText) {
     }
     
     // Check for image/video generation queries (natural language)
-    if (lowerMessage.includes("generate image") || lowerMessage.includes("create image") ||
+    const isImageRequest = lowerMessage.includes("generate image") || lowerMessage.includes("create image") ||
         lowerMessage.includes("make image") || lowerMessage.includes("product photo") ||
         lowerMessage.includes("product image") || lowerMessage.includes("need image") ||
         lowerMessage.includes("create photo") || lowerMessage.includes("generate photo") ||
-        lowerMessage.includes("create video") || lowerMessage.includes("generate video") ||
+        lowerMessage.includes("i need an image") || lowerMessage.includes("i want an image");
+    
+    const isVideoRequest = lowerMessage.includes("create video") || lowerMessage.includes("generate video") ||
         lowerMessage.includes("make video") || lowerMessage.includes("video clip") ||
-        lowerMessage.includes("video for campaign") || lowerMessage.includes("campaign video")) {
+        lowerMessage.includes("video for campaign") || lowerMessage.includes("campaign video") ||
+        lowerMessage.includes("i need a video") || lowerMessage.includes("i want a video");
+    
+    if (isImageRequest || isVideoRequest) {
       detectedIntent = "content_generation";
+      
+      // Try to extract product name from message
+      let productName = null;
+      
+      // Common patterns: "create image of [product]", "generate video for [product]", etc.
+      const productPatterns = [
+        /(?:image|photo|video|clip)\s+(?:of|for|with|showing)\s+([^,\.\?\!]+)/i,
+        /(?:create|generate|make)\s+(?:an?\s+)?(?:image|photo|video|clip)\s+(?:of|for|with|showing)?\s*([^,\.\?\!]+)/i,
+        /(?:serum|shampoo|conditioner|product|mosquito|repellent|cream|oil|mask|treatment)/i
+      ];
+      
+      for (const pattern of productPatterns) {
+        const match = messageText.match(pattern);
+        if (match && match[1]) {
+          productName = match[1].trim().replace(/\s+(image|photo|video|clip|for|of|with|showing)$/i, '').trim();
+          break;
+        }
+      }
+      
+      // If no pattern match, try to find product keywords
+      if (!productName) {
+        const productKeywords = ["serum", "shampoo", "conditioner", "mosquito", "repellent", "cream", "oil", "mask", "treatment"];
+        for (const keyword of productKeywords) {
+          if (lowerMessage.includes(keyword)) {
+            productName = keyword;
+            break;
+          }
+        }
+      }
+      
+      // If we found a product, actually generate the media
+      if (productName) {
+        try {
+          const product = await findProductByName(productName, true);
+          if (product) {
+            // Actually trigger generation instead of just responding
+            if (isVideoRequest) {
+              // Generate video
+              await sendWhatsAppMessage(from, `🎬 Creating optimized prompt for video...`);
+              
+              const session = getSession(from);
+              const companyContext = loadCompanyContext();
+              
+              // Build enhanced prompt
+              const basePrompt = `UGC style video showcasing ${product.name}, natural lighting, authentic feel`;
+              const enhancedPrompt = await enhanceImagePrompt(
+                basePrompt,
+                product,
+                companyContext,
+                session,
+                null,
+                null
+              );
+              
+              await sendWhatsAppMessage(from, `✨ Generating video with enhanced prompt...`);
+              
+              const { generateVideo } = await import("./services/vertexService.js");
+              const result = await generateVideo(enhancedPrompt, "9:16", 8, {
+                title: product.name,
+                shortDesc: product.description || product.short_description || "",
+                permalink: product.permalink || ""
+              });
+              
+              // Upload and send video
+              const mediaId = await uploadWhatsAppMedia(result.buffer, result.mimeType);
+              
+              const caption = `✨ Video generated!\n\n📦 ${product.name}\n\n💡 Reply:\n• "use" - Use in campaign\n• "regenerate" - Create another`;
+              
+              // Send video via WhatsApp
+              try {
+                await axios.post(
+                  `${GRAPH}/${WHATSAPP_PHONE_NUMBER_ID}/messages`,
+                  {
+                    messaging_product: "whatsapp",
+                    recipient_type: "individual",
+                    to: from,
+                    type: "video",
+                    video: {
+                      id: mediaId,
+                      caption: caption
+                    }
+                  },
+                  {
+                    headers: {
+                      Authorization: `Bearer ${WHATSAPP_ACCESS_TOKEN}`,
+                      "Content-Type": "application/json"
+                    }
+                  }
+                );
+                console.log(`[Natural Language] Video sent to ${from}: ${product.name}, media_id: ${mediaId}`);
+              } catch (err) {
+                console.error("[Natural Language] Error sending video:", err.response?.data || err.message);
+                await sendWhatsAppMessage(from, `✅ Video generated but failed to send. Media ID: ${mediaId}\n\nError: ${err.message}`);
+              }
+              
+              // Save to history
+              addToHistory(from, mediaId, `Video: ${product.name}`, product.name, session.angle, session.style);
+              
+              // Don't continue with AI chat - we've handled it
+              return;
+              
+            } else {
+              // Generate image
+              await sendWhatsAppMessage(from, `🎨 Creating optimized prompt...`);
+              
+              const session = getSession(from);
+              const companyContext = loadCompanyContext();
+              
+              // Build enhanced prompt using AI with brand/product data
+              const prompt = await buildEnhancedImagePrompt(product, session, companyContext);
+              
+              await sendWhatsAppMessage(from, `✨ Generating image with enhanced prompt...`);
+              
+              // Generate image (uses Vertex AI or Nano Banana)
+              const imageBuffer = await generateImageWithEngine(prompt, "1:1", 1024, 1024);
+              
+              // Upload to WhatsApp
+              const mediaId = await uploadWhatsAppMedia(imageBuffer, "image/jpeg");
+              
+              // Send image using existing function
+              const caption = `✨ Image generated!\n\n📦 ${product.name}\n📐 Angle: ${session.angle}\n\n💡 Reply:\n• "use" - Use in campaign\n• "edit" - Edit this image\n• "make video" - Create video version\n• "regenerate" - Create another`;
+              
+              await sendWhatsAppImage(from, mediaId, caption);
+              
+              // Save to history
+              addToHistory(from, mediaId, caption, product.name, session.angle, session.style);
+              
+              console.log(`[Natural Language] Generated image for ${from}: ${product.name}, media_id: ${mediaId}`);
+              
+              // Don't continue with AI chat - we've handled it
+              return;
+            }
+          } else {
+            // Product not found - let AI handle it
+            dataContext += `\n\nNote: Could not find product "${productName}". Available products listed below.`;
+          }
+        } catch (err) {
+          console.error("[Natural Language] Media generation error:", err);
+          await sendWhatsAppMessage(from, `⚠️ Failed to generate: ${err.message}\n\nTrying alternative approach...`);
+          // Continue to AI chat for fallback
+        }
+      }
+      
+      // Provide context for AI if generation didn't happen
       try {
         const products = await wooFetch("GET", "/products?per_page=10");
         if (products && products.length > 0) {
@@ -1514,16 +1663,7 @@ async function handleNaturalLanguageChat(from, messageText) {
       } catch (err) {
         dataContext += `\n\nNote: Could not fetch products. Error: ${err.message}`;
       }
-      dataContext += `\n\nYou can generate images and videos using natural language:\n`;
-      dataContext += `- "Create an image of [product] on a beach"\n`;
-      dataContext += `- "Generate a video showing [product] in use"\n`;
-      dataContext += `- "Make a portrait video for Instagram story"\n`;
-      dataContext += `- "Create a square image of shampoo bottle"\n`;
-      dataContext += `\nAfter generation, you can:\n`;
-      dataContext += `- Reply "use" to use in campaign\n`;
-      dataContext += `- Reply "edit" to modify the image\n`;
-      dataContext += `- Reply "make video" to create video version\n`;
-      dataContext += `- Reply "regenerate" to create another\n`;
+      dataContext += `\n\nIMPORTANT: When user requests image/video generation, you should acknowledge enthusiastically and confirm the generation is happening. The system will automatically generate and send the media.`;
     }
     
     // Build enhanced system prompt
@@ -2769,19 +2909,20 @@ initWorkflows({
   TOKEN
 });
 
-// Upload media to WhatsApp
-async function uploadWhatsAppMedia(imageBuffer, mimeType = "image/jpeg") {
+// Upload media to WhatsApp (supports both image and video)
+async function uploadWhatsAppMedia(mediaBuffer, mimeType = "image/jpeg") {
   if (!WHATSAPP_PHONE_NUMBER_ID || !WHATSAPP_ACCESS_TOKEN) {
     throw new Error("WhatsApp credentials not configured");
   }
   
+  const isVideo = mimeType.includes("video");
   const form = new FormData();
-  form.append("file", imageBuffer, {
-    filename: "image.jpg",
+  form.append("file", mediaBuffer, {
+    filename: isVideo ? "video.mp4" : "image.jpg",
     contentType: mimeType
   });
   form.append("messaging_product", "whatsapp");
-  form.append("type", "image");
+  form.append("type", isVideo ? "video" : "image");
   
   try {
     const response = await axios.post(
@@ -2793,7 +2934,8 @@ async function uploadWhatsAppMedia(imageBuffer, mimeType = "image/jpeg") {
           Authorization: `Bearer ${WHATSAPP_ACCESS_TOKEN}`
         },
         maxContentLength: Infinity,
-        maxBodyLength: Infinity
+        maxBodyLength: Infinity,
+        timeout: isVideo ? 120000 : 30000 // 2 minutes for video, 30s for image
       }
     );
     
@@ -2953,6 +3095,102 @@ async function generateImageWithEngine(prompt, aspectRatio = "1:1", width = 1024
 }
 
 // Build image prompt
+// AI Prompt Enhancer - Creates optimized prompts using brand/product data
+async function enhanceImagePrompt(userPrompt, product, companyContext, session, angle = null, style = null) {
+  try {
+    // Build context for prompt enhancement
+    let contextInfo = "";
+    
+    // Company/Brand context
+    if (companyContext) {
+      contextInfo += `BRAND CONTEXT:\n`;
+      if (companyContext.name) contextInfo += `- Brand Name: ${companyContext.name}\n`;
+      if (companyContext.industry) contextInfo += `- Industry: ${companyContext.industry}\n`;
+      if (companyContext.brandValues) contextInfo += `- Brand Values: ${companyContext.brandValues}\n`;
+      if (companyContext.targetAudience) contextInfo += `- Target Audience: ${companyContext.targetAudience}\n`;
+      if (companyContext.campaignGoals) contextInfo += `- Campaign Goals: ${companyContext.campaignGoals}\n`;
+    }
+    
+    // Product context
+    if (product) {
+      contextInfo += `\nPRODUCT CONTEXT:\n`;
+      if (product.name) contextInfo += `- Product Name: ${product.name}\n`;
+      if (product.description) {
+        const desc = product.description.substring(0, 300);
+        contextInfo += `- Description: ${desc}\n`;
+      }
+      if (product.short_description) {
+        const shortDesc = product.short_description.substring(0, 200);
+        contextInfo += `- Key Points: ${shortDesc}\n`;
+      }
+      if (product.categories && product.categories.length > 0) {
+        const cats = product.categories.map(c => c.name || c).join(", ");
+        contextInfo += `- Categories: ${cats}\n`;
+      }
+    }
+    
+    // Style/Angle context
+    if (angle || session?.angle) {
+      const selectedAngle = angle || session.angle;
+      contextInfo += `\nPHOTOGRAPHY STYLE:\n`;
+      contextInfo += `- Angle: ${ANGLE_PRESETS[selectedAngle] || selectedAngle}\n`;
+    }
+    
+    if (style || session?.style) {
+      const selectedStyle = style || session.style;
+      contextInfo += `- Style: ${selectedStyle}\n`;
+    }
+    
+    // Build enhancement prompt
+    const enhancementPrompt = `You are an expert product photography prompt engineer specializing in e-commerce and advertising imagery.
+
+Your task: Transform a basic user request into a highly detailed, professional product photography prompt that will generate stunning, brand-aligned images.
+
+${contextInfo}
+
+USER REQUEST: "${userPrompt}"
+
+Create an enhanced, detailed prompt that:
+1. Incorporates the brand's values and target audience preferences
+2. Highlights the product's key features and benefits
+3. Uses professional photography terminology (lighting, composition, depth of field, etc.)
+4. Includes specific visual details (surfaces, backgrounds, props if appropriate)
+5. Ensures the image aligns with the brand's aesthetic and campaign goals
+6. Is optimized for e-commerce and social media advertising
+7. Avoids text overlays or price tags (product photography only)
+8. Creates a premium, professional look
+
+Return ONLY the enhanced prompt text (no explanations, no markdown, just the prompt). Keep it concise but detailed (2-4 sentences max).`;
+
+    const response = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        {
+          role: "system",
+          content: "You are an expert product photography prompt engineer. Create detailed, professional prompts optimized for AI image generation."
+        },
+        {
+          role: "user",
+          content: enhancementPrompt
+        }
+      ],
+      temperature: 0.8,
+      max_tokens: 300
+    });
+    
+    const enhancedPrompt = response.choices[0].message.content.trim();
+    console.log(`[Prompt Enhancer] Enhanced: "${userPrompt}" → "${enhancedPrompt}"`);
+    
+    return enhancedPrompt;
+    
+  } catch (err) {
+    console.error("[Prompt Enhancer] Error:", err.message);
+    // Fallback to original prompt if enhancement fails
+    return userPrompt;
+  }
+}
+
+// Build base image prompt (simple version)
 function buildImagePrompt(product, session, companyContext, styleOverride = null) {
   const style = styleOverride || session.style;
   const angleDesc = ANGLE_PRESETS[session.angle] || ANGLE_PRESETS["front"];
@@ -2969,6 +3207,27 @@ function buildImagePrompt(product, session, companyContext, styleOverride = null
   prompt += `no text, no price tags, no watermarks, clean background`;
   
   return prompt;
+}
+
+// Build enhanced image prompt using AI (recommended)
+async function buildEnhancedImagePrompt(product, session, companyContext, styleOverride = null, userRequest = null) {
+  // Build base prompt first
+  const basePrompt = buildImagePrompt(product, session, companyContext, styleOverride);
+  
+  // If user provided a specific request, use that; otherwise use base prompt
+  const userPrompt = userRequest || basePrompt;
+  
+  // Enhance with AI using brand/product data
+  const enhancedPrompt = await enhanceImagePrompt(
+    userPrompt,
+    product,
+    companyContext,
+    session,
+    session.angle,
+    styleOverride || session.style
+  );
+  
+  return enhancedPrompt;
 }
 
 // Command handlers for image generation
@@ -3020,11 +3279,15 @@ async function handleImage(from, params) {
       return;
     }
     
-    await sendWhatsAppMessage(from, "🎨 Generating image...");
+    await sendWhatsAppMessage(from, "🎨 Creating optimized prompt...");
     
     const session = getSession(from);
     const companyContext = loadCompanyContext();
-    const prompt = buildImagePrompt(product, session, companyContext, styleOverride);
+    
+    // Build enhanced prompt using AI with brand/product data
+    const prompt = await buildEnhancedImagePrompt(product, session, companyContext, styleOverride);
+    
+    await sendWhatsAppMessage(from, "✨ Generating image with enhanced prompt...");
     
     // Generate image (uses Vertex AI or Nano Banana)
     const imageBuffer = await generateImageWithEngine(prompt, "1:1", 1024, 1024);
@@ -3075,11 +3338,15 @@ async function handleImages(from, params) {
       return;
     }
     
-    await sendWhatsAppMessage(from, "🎞️ Generating image pack (3 sizes)...");
+    await sendWhatsAppMessage(from, "🎞️ Creating optimized prompt for image pack...");
     
     const session = getSession(from);
     const companyContext = loadCompanyContext();
-    const prompt = buildImagePrompt(product, session, companyContext);
+    
+    // Build enhanced prompt using AI with brand/product data
+    const prompt = await buildEnhancedImagePrompt(product, session, companyContext);
+    
+    await sendWhatsAppMessage(from, "✨ Generating image pack (3 sizes) with enhanced prompt...");
     
     // Generate base image at 1024x1024 (uses Vertex AI or Nano Banana)
     const baseImage = await generateImageWithEngine(prompt, "1:1", 1024, 1024);
@@ -3150,7 +3417,7 @@ async function handleRedo(from) {
   }
   
   try {
-    await sendWhatsAppMessage(from, "🔄 Regenerating with new seed...");
+    await sendWhatsAppMessage(from, "🔄 Creating optimized prompt for regeneration...");
     
     const product = await findProductByName(last.product);
     if (!product) {
@@ -3164,7 +3431,11 @@ async function handleRedo(from) {
     session.style = last.style;
     
     const companyContext = loadCompanyContext();
-    const prompt = buildImagePrompt(product, session, companyContext);
+    
+    // Build enhanced prompt using AI with brand/product data
+    const prompt = await buildEnhancedImagePrompt(product, session, companyContext);
+    
+    await sendWhatsAppMessage(from, "✨ Regenerating with enhanced prompt...");
     
     // Generate new image (uses Vertex AI or Nano Banana)
     const imageBuffer = await generateImageWithEngine(prompt, "1:1", 1024, 1024);
