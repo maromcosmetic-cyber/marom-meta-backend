@@ -5331,6 +5331,33 @@ app.delete("/api/audiences/:id", requireAdminKey, (req, res) => {
   }
 });
 
+// Geocoding proxy endpoint (to avoid CORS issues)
+app.get("/api/geocode/search", async (req, res) => {
+  try {
+    const { q, limit = 5 } = req.query;
+    
+    if (!q || q.trim() === '') {
+      return res.status(400).json({ error: "Query parameter 'q' is required" });
+    }
+    
+    const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=${limit}&accept-language=en&addressdetails=1&namedetails=1`;
+    
+    const response = await axios.get(url, {
+      headers: {
+        'User-Agent': 'MAROM Dashboard',
+        'Accept': 'application/json',
+        'Accept-Language': 'en'
+      },
+      timeout: 10000
+    });
+    
+    res.json(response.data);
+  } catch (err) {
+    console.error("[Geocode] Error:", err.message);
+    res.status(500).json({ error: err.message || "Geocoding failed" });
+  }
+});
+
 // Load routes before starting server
 await loadVertexRoutes();
 
