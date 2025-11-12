@@ -28,12 +28,17 @@ const __dirname = path.dirname(__filename);
 
 // Memory storage paths
 const MEMORY_DIR = path.join(__dirname, "memory");
+const DATA_DIR = path.join(__dirname, "data");
 const COMPANY_FILE = path.join(MEMORY_DIR, "company.json");
 const CONVERSATIONS_FILE = path.join(MEMORY_DIR, "conversations.json");
+const AUDIENCES_FILE = path.join(DATA_DIR, "audiences.json");
 
-// Ensure memory directory exists
+// Ensure memory and data directories exist
 if (!fs.existsSync(MEMORY_DIR)) {
   fs.mkdirSync(MEMORY_DIR, { recursive: true });
+}
+if (!fs.existsSync(DATA_DIR)) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
 // Load company context
@@ -5193,6 +5198,134 @@ async function loadVertexRoutes() {
     console.warn("   Make sure routes/media.js and routes/whatsapp.js are deployed.");
   }
 }
+
+// Audience Management Functions
+function loadAudiences() {
+  try {
+    if (fs.existsSync(AUDIENCES_FILE)) {
+      const data = fs.readFileSync(AUDIENCES_FILE, "utf8");
+      return JSON.parse(data);
+    }
+  } catch (err) {
+    console.error("[Audiences] Error loading audiences:", err);
+  }
+  return [];
+}
+
+function saveAudiences(audiences) {
+  try {
+    fs.writeFileSync(AUDIENCES_FILE, JSON.stringify(audiences, null, 2), "utf8");
+    return true;
+  } catch (err) {
+    console.error("[Audiences] Error saving audiences:", err);
+    return false;
+  }
+}
+
+// Audience CRUD Endpoints
+app.get("/api/audiences", requireAdminKey, (req, res) => {
+  try {
+    const audiences = loadAudiences();
+    res.json(audiences);
+  } catch (err) {
+    console.error("[Audiences] GET error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/audiences", requireAdminKey, (req, res) => {
+  try {
+    const { name, ageMin, ageMax, gender, locations, interests, behaviors } = req.body;
+    
+    if (!name || name.trim() === '') {
+      return res.status(400).json({ error: "Audience name is required" });
+    }
+    
+    const audiences = loadAudiences();
+    const newId = Date.now().toString();
+    
+    const newAudience = {
+      id: newId,
+      name: name.trim(),
+      ageMin: ageMin || null,
+      ageMax: ageMax || null,
+      gender: gender || "",
+      locations: locations || "",
+      interests: interests || "",
+      behaviors: behaviors || "",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+    
+    audiences.push(newAudience);
+    saveAudiences(audiences);
+    
+    console.log(`[Audiences] Created audience: ${newAudience.name} (ID: ${newId})`);
+    res.json(newAudience);
+  } catch (err) {
+    console.error("[Audiences] POST error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put("/api/audiences/:id", requireAdminKey, (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, ageMin, ageMax, gender, locations, interests, behaviors } = req.body;
+    
+    if (!name || name.trim() === '') {
+      return res.status(400).json({ error: "Audience name is required" });
+    }
+    
+    const audiences = loadAudiences();
+    const index = audiences.findIndex(a => a.id === id);
+    
+    if (index === -1) {
+      return res.status(404).json({ error: "Audience not found" });
+    }
+    
+    audiences[index] = {
+      ...audiences[index],
+      name: name.trim(),
+      ageMin: ageMin || null,
+      ageMax: ageMax || null,
+      gender: gender || "",
+      locations: locations || "",
+      interests: interests || "",
+      behaviors: behaviors || "",
+      updatedAt: new Date().toISOString()
+    };
+    
+    saveAudiences(audiences);
+    
+    console.log(`[Audiences] Updated audience: ${audiences[index].name} (ID: ${id})`);
+    res.json(audiences[index]);
+  } catch (err) {
+    console.error("[Audiences] PUT error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete("/api/audiences/:id", requireAdminKey, (req, res) => {
+  try {
+    const { id } = req.params;
+    const audiences = loadAudiences();
+    const index = audiences.findIndex(a => a.id === id);
+    
+    if (index === -1) {
+      return res.status(404).json({ error: "Audience not found" });
+    }
+    
+    const deleted = audiences.splice(index, 1)[0];
+    saveAudiences(audiences);
+    
+    console.log(`[Audiences] Deleted audience: ${deleted.name} (ID: ${id})`);
+    res.json({ success: true, deleted });
+  } catch (err) {
+    console.error("[Audiences] DELETE error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // Load routes before starting server
 await loadVertexRoutes();
