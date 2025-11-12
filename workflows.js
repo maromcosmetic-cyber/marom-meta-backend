@@ -344,9 +344,30 @@ async function handleCampaignMediaSelection(from, messageText, workflow) {
         permalink: product.permalink || ""
       });
     } else {
-      // Generate image(s)
+      // Generate image(s) with enhanced prompt
+      await sendWhatsAppMessage(from, `🎨 Creating optimized prompt...`);
+      
+      // Build enhanced prompt using AI (need to import from server.js)
+      // For now, use a better base prompt with product context
       const { generateImage } = await import("./services/vertexService.js");
-      const prompt = `Professional product photography of ${product.name}, ${ANGLE_PRESETS[session.angle]}, ${session.style}`;
+      
+      // Enhanced prompt with brand/product context
+      let prompt = `Professional product photography of ${product.name}`;
+      if (ANGLE_PRESETS[session.angle]) {
+        prompt += `, ${ANGLE_PRESETS[session.angle]}`;
+      }
+      if (session.style) {
+        prompt += `, ${session.style}`;
+      }
+      if (product.description || product.short_description) {
+        const desc = (product.description || product.short_description).substring(0, 150);
+        prompt += `. Product features: ${desc}`;
+      }
+      prompt += `. Premium e-commerce photography, high quality, sharp focus, clean background, no text, no watermarks`;
+      
+      // TODO: Integrate with enhanceImagePrompt from server.js
+      // For now, use the enhanced prompt above
+      
       result = await generateImage(prompt, "1:1", {
         title: product.name,
         shortDesc: product.description || product.short_description || "",
