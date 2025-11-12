@@ -1595,11 +1595,47 @@ async function handleNaturalLanguageChat(from, messageText) {
               
               let generateVideo;
               try {
-                const vertexModule = await import("./services/vertexService.js");
+                // Try multiple possible paths for production environments
+                let vertexModule;
+                const possiblePaths = [
+                  "./services/vertexService.js",
+                  path.join(__dirname, "services", "vertexService.js"),
+                  path.join(process.cwd(), "services", "vertexService.js"),
+                  "../services/vertexService.js"
+                ];
+                
+                let importError = null;
+                for (const importPath of possiblePaths) {
+                  try {
+                    // For absolute paths, convert to file:// URL for ES modules
+                    const normalizedPath = importPath.startsWith(".") 
+                      ? importPath 
+                      : `file://${importPath}`;
+                    vertexModule = await import(normalizedPath);
+                    console.log(`[Video Generation] Successfully imported Vertex AI from: ${importPath}`);
+                    break;
+                  } catch (err) {
+                    importError = err;
+                    continue;
+                  }
+                }
+                
+                if (!vertexModule) {
+                  throw importError || new Error("Could not import vertexService from any path");
+                }
+                
                 generateVideo = vertexModule.generateVideo;
+                if (!generateVideo) {
+                  throw new Error("generateVideo function not found in vertexService module");
+                }
               } catch (importErr) {
                 console.error("[Video Generation] Failed to import vertexService:", importErr.message);
-                await sendWhatsAppMessage(from, `⚠️ Video generation service not available. Please check Vertex AI configuration.`);
+                console.error("[Video Generation] Import error details:", {
+                  message: importErr.message,
+                  code: importErr.code,
+                  path: importErr.path || "unknown"
+                });
+                await sendWhatsAppMessage(from, `⚠️ Video generation service not available. Please check Vertex AI configuration.\n\nError: ${importErr.message}`);
                 return;
               }
               
@@ -3119,9 +3155,36 @@ async function checkImageConfig() {
   let vertexAvailable = false;
   if (process.env.GOOGLE_CLOUD_PROJECT && process.env.GOOGLE_APPLICATION_CREDENTIALS) {
     try {
-      // Try to import to verify it exists
-      await import("./services/vertexService.js");
-      vertexAvailable = true;
+      // Check if file exists first - try multiple possible locations
+      const possiblePaths = [
+        path.join(__dirname, "services", "vertexService.js"),
+        path.join(process.cwd(), "services", "vertexService.js"),
+        "./services/vertexService.js"
+      ];
+      
+      let foundPath = null;
+      for (const checkPath of possiblePaths) {
+        if (fs.existsSync(checkPath)) {
+          foundPath = checkPath;
+          break;
+        }
+      }
+      
+      if (foundPath) {
+        try {
+          // Convert to file:// URL for ES module import
+          const importPath = foundPath.startsWith(".") ? foundPath : `file://${foundPath}`;
+          await import(importPath);
+          vertexAvailable = true;
+          console.log(`[Image Config] Vertex AI module found and loaded from: ${foundPath}`);
+        } catch (importErr) {
+          console.warn(`[Image Config] Vertex AI module exists but failed to import: ${importErr.message}`);
+          vertexAvailable = false;
+        }
+      } else {
+        console.warn(`[Image Config] Vertex AI module not found in any of these paths: ${possiblePaths.join(", ")}`);
+        vertexAvailable = false;
+      }
     } catch (importErr) {
       console.warn("[Image Config] Vertex AI module not available:", importErr.message);
       vertexAvailable = false;
@@ -3134,6 +3197,7 @@ async function checkImageConfig() {
   
   // Fallback to Nano Banana if configured
   if (NB_BASE_URL) {
+    console.log("[Image Config] Using Nano Banana as image engine");
     return "nanobanana";
   }
   
@@ -3150,10 +3214,46 @@ async function generateImageWithEngine(prompt, aspectRatio = "1:1", width = 1024
       try {
         let generateImage;
         try {
-          const vertexModule = await import("./services/vertexService.js");
+          // Try multiple possible paths for production environments
+          let vertexModule;
+          const possiblePaths = [
+            "./services/vertexService.js",
+            path.join(__dirname, "services", "vertexService.js"),
+            path.join(process.cwd(), "services", "vertexService.js"),
+            "../services/vertexService.js"
+          ];
+          
+          let importError = null;
+          for (const importPath of possiblePaths) {
+            try {
+              // For absolute paths, convert to file:// URL for ES modules
+              const normalizedPath = importPath.startsWith(".") 
+                ? importPath 
+                : `file://${importPath}`;
+              vertexModule = await import(normalizedPath);
+              console.log(`[Image Generation] Successfully imported Vertex AI from: ${importPath}`);
+              break;
+            } catch (err) {
+              importError = err;
+              continue;
+            }
+          }
+          
+          if (!vertexModule) {
+            throw importError || new Error("Could not import vertexService from any path");
+          }
+          
           generateImage = vertexModule.generateImage;
+          if (!generateImage) {
+            throw new Error("generateImage function not found in vertexService module");
+          }
         } catch (importErr) {
           console.error("[Image Generation] Failed to import vertexService:", importErr.message);
+          console.error("[Image Generation] Import error details:", {
+            message: importErr.message,
+            code: importErr.code,
+            path: importErr.path || "unknown"
+          });
           // Fallback to Nano Banana if Vertex AI import fails
           if (NB_BASE_URL) {
             console.log("[Image Generation] Falling back to Nano Banana due to Vertex AI import error");
