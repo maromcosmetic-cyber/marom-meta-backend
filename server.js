@@ -8,6 +8,9 @@ import { fileURLToPath } from "url";
 import OpenAI from "openai";
 import sharp from "sharp";
 import FormData from "form-data";
+// Import new routes
+import mediaRoutes from "./routes/media.js";
+import whatsappWebhookRoutes from "./routes/whatsapp.js";
 dotenv.config();
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -159,21 +162,120 @@ function normalizeProduct(wcProduct) {
   };
 }
 
-// Find product by name (searches WooCommerce)
-async function findProductByName(name) {
+// Get cached products or fetch fresh
+async function getProductsCache() {
+  const now = Date.now();
+  if (!productCache || (now - productCacheTimestamp) > PRODUCT_CACHE_TTL) {
+    try {
+      productCache = await wooFetch("GET", "/products?per_page=100");
+      productCacheTimestamp = now;
+      console.log(`[Products] Cache refreshed: ${productCache.length} products`);
+    } catch (err) {
+      console.error("[Products] Cache refresh failed:", err.message);
+      // Use stale cache if available
+      if (!productCache) throw err;
+    }
+  }
+  return productCache || [];
+}
+
+// Calculate similarity score between two strings (Levenshtein-based)
+function calculateSimilarity(str1, str2) {
+  const s1 = str1.toLowerCase();
+  const s2 = str2.toLowerCase();
+  
+  // Exact match
+  if (s1 === s2) return 1.0;
+  
+  // Contains match
+  if (s1.includes(s2) || s2.includes(s1)) return 0.8;
+  
+  // Word-based matching
+  const words1 = s1.split(/\s+/);
+  const words2 = s2.split(/\s+/);
+  const commonWords = words1.filter(w => words2.includes(w));
+  if (commonWords.length > 0) {
+    return commonWords.length / Math.max(words1.length, words2.length);
+  }
+  
+  // Simple Levenshtein distance approximation
+  const maxLen = Math.max(s1.length, s2.length);
+  if (maxLen === 0) return 1.0;
+  
+  let matches = 0;
+  const minLen = Math.min(s1.length, s2.length);
+  for (let i = 0; i < minLen; i++) {
+    if (s1[i] === s2[i]) matches++;
+  }
+  
+  return matches / maxLen;
+}
+
+// Find product by name with fuzzy matching and scoring
+async function findProductByName(name, useCache = true) {
   try {
-    const products = await wooFetch("GET", "/products", null);
+    const products = useCache ? await getProductsCache() : await wooFetch("GET", "/products?per_page=100");
     const searchName = name.toLowerCase().trim();
     
-    const found = products.find(p => {
+    if (!searchName) return null;
+    
+    // Score all products
+    const scored = products.map(p => {
       const productName = (p.name || "").toLowerCase();
-      return productName.includes(searchName);
+      const sku = (p.sku || "").toLowerCase();
+      
+      // Calculate similarity scores
+      const nameScore = calculateSimilarity(searchName, productName);
+      const skuScore = sku && calculateSimilarity(searchName, sku) * 0.7; // SKU matches are less important
+      
+      // Bonus for exact word matches
+      const searchWords = searchName.split(/\s+/);
+      const productWords = productName.split(/\s+/);
+      const wordMatchBonus = searchWords.filter(w => productWords.includes(w)).length / searchWords.length * 0.2;
+      
+      const totalScore = Math.max(nameScore, skuScore || 0) + wordMatchBonus;
+      
+      return { product: p, score: totalScore };
     });
     
-    return found ? normalizeProduct(found) : null;
+    // Sort by score descending
+    scored.sort((a, b) => b.score - a.score);
+    
+    // Return best match if score is above threshold (0.5)
+    if (scored.length > 0 && scored[0].score >= 0.5) {
+      const best = scored[0];
+      console.log(`[Products] Found "${name}" → "${best.product.name}" (score: ${best.score.toFixed(2)})`);
+      return normalizeProduct(best.product);
+    }
+    
+    // If no good match, return null
+    if (scored.length > 0) {
+      console.log(`[Products] No good match for "${name}". Best: "${scored[0].product.name}" (score: ${scored[0].score.toFixed(2)})`);
+    }
+    
+    return null;
   } catch (err) {
     console.error("[WooCommerce] Error finding product:", err.message);
     return null;
+  }
+}
+
+// Find multiple product candidates (for disambiguation)
+async function findProductCandidates(name, limit = 5) {
+  try {
+    const products = await getProductsCache();
+    const searchName = name.toLowerCase().trim();
+    
+    const scored = products.map(p => {
+      const productName = (p.name || "").toLowerCase();
+      const score = calculateSimilarity(searchName, productName);
+      return { product: normalizeProduct(p), score };
+    });
+    
+    scored.sort((a, b) => b.score - a.score);
+    return scored.slice(0, limit).filter(s => s.score >= 0.3).map(s => s.product);
+  } catch (err) {
+    return [];
   }
 }
 
@@ -283,6 +385,18 @@ const imageSessions = new Map(); // phone -> { angle, style, bg, aspect }
 
 // Recent creative history (ring buffer, last 20 per user)
 const creativeHistory = new Map(); // phone -> Array<{ mediaId, caption, product, angle, style, timestamp }>
+
+// Conversation context (last mentioned products, recent actions)
+const conversationContext = new Map(); // phone -> { lastProduct: {id, name}, lastAction: "edit", timestamp, lastProductList: [], conversationHistory: [] }
+
+// Per-user conversation history (for memory)
+const userConversations = new Map(); // phone -> Array<{role: "user"|"assistant", content: string, timestamp: number}>
+const MAX_CONVERSATION_HISTORY = 20; // Keep last 20 messages per user
+
+// Product cache with TTL (5 minutes)
+let productCache = null;
+let productCacheTimestamp = 0;
+const PRODUCT_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
 // Angle presets
 const ANGLE_PRESETS = {
@@ -503,43 +617,122 @@ function logCommand(command, from, result) {
 }
 
 // Handle incoming WhatsApp message
-// Parse natural language product edit requests
-function parseProductEditRequest(messageText) {
+// Get conversation context for a user
+function getConversationContext(from) {
+  if (!conversationContext.has(from)) {
+    conversationContext.set(from, {
+      lastProduct: null,
+      lastAction: null,
+      lastProductList: null, // Store the last shown product list for "number X" references
+      conversationHistory: [], // Recent conversation messages for context
+      timestamp: Date.now()
+    });
+  }
+  return conversationContext.get(from);
+}
+
+// Add message to user's conversation history
+function addToConversationHistory(from, role, content) {
+  if (!userConversations.has(from)) {
+    userConversations.set(from, []);
+  }
+  
+  const history = userConversations.get(from);
+  history.push({
+    role: role, // "user" or "assistant"
+    content: content,
+    timestamp: Date.now()
+  });
+  
+  // Keep only last MAX_CONVERSATION_HISTORY messages
+  if (history.length > MAX_CONVERSATION_HISTORY) {
+    history.shift(); // Remove oldest
+  }
+  
+  // Also update conversation context
+  const ctx = getConversationContext(from);
+  ctx.conversationHistory = history.slice(-10); // Keep last 10 in context too
+}
+
+// Get conversation history for a user (formatted for AI prompt)
+function getConversationHistoryForPrompt(from, maxMessages = 10) {
+  if (!userConversations.has(from)) {
+    return "";
+  }
+  
+  const history = userConversations.get(from);
+  const recent = history.slice(-maxMessages); // Last N messages
+  
+  if (recent.length === 0) return "";
+  
+  let historyText = "\n\nRECENT CONVERSATION HISTORY:\n";
+  recent.forEach((msg, idx) => {
+    const role = msg.role === "user" ? "User" : "Assistant";
+    historyText += `${role}: ${msg.content}\n`;
+  });
+  historyText += "\nUse this context to understand what we've been discussing. Reference previous messages naturally when relevant.\n";
+  
+  return historyText;
+}
+
+// Update conversation context
+function updateConversationContext(from, product = null, action = null) {
+  const ctx = getConversationContext(from);
+  if (product) {
+    ctx.lastProduct = { id: product.id, name: product.name };
+  }
+  if (action) {
+    ctx.lastAction = action;
+  }
+  ctx.timestamp = Date.now();
+  
+  // Clean old contexts (older than 30 minutes)
+  const now = Date.now();
+  for (const [phone, context] of conversationContext.entries()) {
+    if (now - context.timestamp > 30 * 60 * 1000) {
+      conversationContext.delete(phone);
+    }
+  }
+}
+
+// Parse natural language product edit requests with improved accuracy
+async function parseProductEditRequest(messageText, from = null) {
   const lower = messageText.toLowerCase();
   
-  // Patterns: "change name to X", "update title to X", "set name as X", "make it X", "rename to X"
+  // Enhanced patterns with more variations
   const namePatterns = [
-    /(?:change|update|set|make|rename|edit)\s+(?:the\s+)?(?:product\s+)?(?:name|title)\s+(?:to|as|is)\s+["']?([^"'\n]+)["']?/i,
-    /(?:name|title)\s+(?:should\s+be|is|to)\s+["']?([^"'\n]+)["']?/i,
-    /(?:change|update)\s+["']?([^"'\n]+)["']?\s+(?:name|title)/i,
-    /(?:want|need)\s+(?:the\s+)?(?:name|title)\s+(?:to\s+be|as)\s+["']?([^"'\n]+)["']?/i
+    /(?:change|update|set|make|rename|edit|modify)\s+(?:the\s+)?(?:product\s+)?(?:name|title)\s+(?:to|as|is|be)\s+["']?([^"'\n]+?)["']?(?:\s|$|\.|,)/i,
+    /(?:name|title)\s+(?:should\s+be|is|to|as)\s+["']?([^"'\n]+?)["']?(?:\s|$|\.|,)/i,
+    /(?:change|update|rename)\s+["']?([^"'\n]+?)["']?\s+(?:name|title)/i,
+    /(?:want|need|make)\s+(?:the\s+)?(?:name|title)\s+(?:to\s+be|as)\s+["']?([^"'\n]+?)["']?(?:\s|$|\.|,)/i,
+    /(?:call|name)\s+it\s+["']?([^"'\n]+?)["']?(?:\s|$|\.|,)/i
   ];
   
-  // Patterns: "change price to X", "update price to $X", "set price as X"
   const pricePatterns = [
-    /(?:change|update|set|make)\s+(?:the\s+)?(?:product\s+)?price\s+(?:to|as|is)\s+[$]?([\d.]+)/i,
-    /price\s+(?:should\s+be|is|to)\s+[$]?([\d.]+)/i,
-    /(?:want|need)\s+(?:the\s+)?price\s+(?:to\s+be|as)\s+[$]?([\d.]+)/i
+    /(?:change|update|set|make)\s+(?:the\s+)?(?:product\s+)?price\s+(?:to|as|is|be)\s+[$]?([\d.]+)/i,
+    /price\s+(?:should\s+be|is|to|as)\s+[$]?([\d.]+)/i,
+    /(?:want|need|make)\s+(?:the\s+)?price\s+(?:to\s+be|as)\s+[$]?([\d.]+)/i,
+    /[$]?([\d.]+)\s+(?:for|as)\s+(?:the\s+)?price/i
   ];
   
-  // Patterns: "change description to X", "update description"
   const descPatterns = [
-    /(?:change|update|set)\s+(?:the\s+)?(?:product\s+)?description\s+(?:to|as|is)\s+["']?([^"'\n]+)["']?/i,
-    /description\s+(?:should\s+be|is|to)\s+["']?([^"'\n]+)["']?/i
+    /(?:change|update|set|edit)\s+(?:the\s+)?(?:product\s+)?description\s+(?:to|as|is|be)\s+["']?([^"'\n]+?)["']?(?:\s|$|\.|,)/i,
+    /description\s+(?:should\s+be|is|to|as)\s+["']?([^"'\n]+?)["']?(?:\s|$|\.|,)/i
   ];
-  
-  // Find product name (look for product mentions or common product words)
-  const productMatch = messageText.match(/\b(shampoo|hair|treatment|cream|serum|oil|mask|product|item|it)\b/i);
-  const productName = productMatch && productMatch[0].toLowerCase() !== "it" ? productMatch[0] : null;
   
   const updates = {};
   
-  // Extract name/title
+  // Extract name/title (more aggressive matching)
   for (const pattern of namePatterns) {
     const match = messageText.match(pattern);
     if (match && match[1]) {
-      updates.title = match[1].trim();
-      break;
+      let value = match[1].trim();
+      // Clean up common trailing words
+      value = value.replace(/\s+(please|thanks|thank you|ok|okay)$/i, "").trim();
+      if (value.length > 0) {
+        updates.title = value;
+        break;
+      }
     }
   }
   
@@ -561,12 +754,84 @@ function parseProductEditRequest(messageText) {
     }
   }
   
-  // If we found updates but no product name, try to infer from context
-  if (Object.keys(updates).length > 0 && !productName) {
-    // Look for quoted product names or common patterns
-    const quotedMatch = messageText.match(/["']([^"']+)["']/);
-    if (quotedMatch && !quotedMatch[1].match(/^\d+\.?\d*$/)) { // Not just a number
-      return { productName: quotedMatch[1], updates };
+  // Find product name - improved extraction with number support
+  let productName = null;
+  
+  // 0. Check for "product number X" or "number X" references
+  if (from) {
+    const ctx = getConversationContext(from);
+    if (ctx.lastProductList && ctx.lastProductList.length > 0) {
+      // Match patterns like "product number 5", "number 5", "#5", "product 5"
+      const numberMatch = messageText.match(/(?:product\s+)?(?:number|#|num|no\.?)\s*(\d+)/i);
+      if (numberMatch) {
+        const index = parseInt(numberMatch[1]) - 1;
+        if (index >= 0 && index < ctx.lastProductList.length) {
+          const product = ctx.lastProductList[index];
+          productName = product.name;
+          console.log(`[Context] Using product number ${numberMatch[1]}: ${productName}`);
+        }
+      }
+    }
+  }
+  
+  // 1. Check conversation context for "it", "this", "that"
+  if (!productName && from) {
+    const ctx = getConversationContext(from);
+    if (ctx.lastProduct && (lower.includes("it") || lower.includes("this") || lower.includes("that") || Object.keys(updates).length > 0)) {
+      productName = ctx.lastProduct.name;
+      console.log(`[Context] Using last mentioned product: ${productName}`);
+    }
+  }
+  
+  // 2. Look for explicit product mentions
+  if (!productName) {
+    // Common product keywords
+    const productKeywords = /\b(shampoo|hair|treatment|cream|serum|oil|mask|conditioner|toner|cleanser)\b/i;
+    const keywordMatch = messageText.match(productKeywords);
+    if (keywordMatch) {
+      productName = keywordMatch[0];
+    }
+  }
+  
+  // 3. Look for quoted names
+  if (!productName) {
+    const quotedMatch = messageText.match(/["']([^"']{2,})["']/);
+    if (quotedMatch && !quotedMatch[1].match(/^\d+\.?\d*$/)) {
+      // Check if it's likely a product name (not a price or description)
+      const quoted = quotedMatch[1].trim();
+      if (quoted.length > 2 && !quoted.match(/^\$?\d+\.?\d*$/)) {
+        productName = quoted;
+      }
+    }
+  }
+  
+  // 4. Extract product name before "name" or "title" keywords
+  if (!productName && updates.title) {
+    const beforeNameMatch = messageText.match(/(.+?)\s+(?:name|title)\s+(?:to|as|is|be)/i);
+    if (beforeNameMatch && beforeNameMatch[1]) {
+      let candidate = beforeNameMatch[1].replace(/(?:change|update|set|make|rename|edit|the|product|number|#|num|no\.?)\s*\d*\s*/gi, "").trim();
+      // Remove number if it's just "product number X"
+      candidate = candidate.replace(/^(?:product\s+)?(?:number|#|num|no\.?)\s*\d+\s*$/i, "").trim();
+      if (candidate.length > 2 && !candidate.match(/^\d+$/)) {
+        productName = candidate;
+      }
+    }
+  }
+  
+  // 5. If we have updates but no product name, try to extract from the beginning
+  if (!productName && Object.keys(updates).length > 0) {
+    // Pattern: "change product number X name to Y" -> extract X
+    const fullPattern = /(?:change|update|set|make|rename|edit)\s+(?:product\s+)?(?:number|#|num|no\.?)\s*(\d+)/i;
+    const fullMatch = messageText.match(fullPattern);
+    if (fullMatch && from) {
+      const ctx = getConversationContext(from);
+      if (ctx.lastProductList && ctx.lastProductList.length > 0) {
+        const index = parseInt(fullMatch[1]) - 1;
+        if (index >= 0 && index < ctx.lastProductList.length) {
+          productName = ctx.lastProductList[index].name;
+          console.log(`[Context] Extracted product number ${fullMatch[1]}: ${productName}`);
+        }
+      }
     }
   }
   
@@ -606,11 +871,39 @@ async function handleIncomingWhatsAppMessage(message, contact) {
     await executeCommand(from, command, params, false);
   } else {
     // Check for natural language product edit requests first
-    const editRequest = parseProductEditRequest(messageText);
+    const editRequest = await parseProductEditRequest(messageText, from);
     if (editRequest && editRequest.productName && Object.keys(editRequest.updates).length > 0) {
+      // Send immediate acknowledgment
+      addToConversationHistory(from, "user", messageText);
+      await sendWhatsAppMessage(from, "🔄 Updating...");
+      
       // Execute the edit directly
       try {
-        const product = await findProductByName(editRequest.productName);
+        // Find product with fuzzy matching
+        let product = await findProductByName(editRequest.productName, true);
+        
+        // If not found, try candidates for disambiguation
+        if (!product) {
+          const candidates = await findProductCandidates(editRequest.productName, 3);
+          if (candidates.length === 1) {
+            product = candidates[0];
+            console.log(`[Products] Using single candidate: ${product.name}`);
+          } else if (candidates.length > 1) {
+            let candidateMsg = `I found ${candidates.length} similar products:\n\n`;
+            candidates.forEach((c, i) => {
+              candidateMsg += `${i + 1}. ${c.name}\n`;
+            });
+            candidateMsg += `\nWhich one did you mean? Reply with the number or product name.`;
+            await sendWhatsAppMessage(from, candidateMsg);
+            // Store candidates in context for follow-up
+            getConversationContext(from).candidates = candidates;
+            return;
+          } else {
+            await sendWhatsAppMessage(from, `I couldn't find a product matching "${editRequest.productName}".\n\nUse /products to see all products, or try a more specific name.`);
+            return;
+          }
+        }
+        
         if (!product) {
           await sendWhatsAppMessage(from, `I couldn't find a product called "${editRequest.productName}". Want me to list all products?`);
           return;
@@ -621,13 +914,16 @@ async function handleIncomingWhatsAppMessage(message, contact) {
           return;
         }
         
+        // Update conversation context
+        updateConversationContext(from, product, "edit");
+        
         // Build update payload
         const updateData = {};
         if (editRequest.updates.title) updateData.name = editRequest.updates.title;
         if (editRequest.updates.price) updateData.regular_price = String(editRequest.updates.price);
         if (editRequest.updates.description) updateData.description = editRequest.updates.description;
         
-        // Execute update (reuse the same logic from handleProduct)
+        // Execute update and fetch fresh product in parallel for faster response
         const baseUrl = WC_API_URL.replace(/\/products.*$/, "");
         const endpoint = `/products/${product.id}`;
         const fullUrl = `${baseUrl}${endpoint}`;
@@ -647,25 +943,72 @@ async function handleIncomingWhatsAppMessage(message, contact) {
         });
         
         if (response.status >= 200 && response.status < 300) {
+          // Invalidate cache and fetch fresh product
+          productCache = null;
           const freshProduct = await wooFetch("GET", `/products/${product.id}`);
-          let confirmMsg = `✅ Done! Updated ${product.name}:\n\n`;
+          
+          // Update context with new product name
+          if (freshProduct) {
+            updateConversationContext(from, normalizeProduct(freshProduct), "edit");
+          }
+          
+          let confirmMsg = `✅ Done! Updated:\n\n`;
           
           if (editRequest.updates.title) {
-            confirmMsg += `📦 Name: ${freshProduct.name || editRequest.updates.title}\n`;
+            confirmMsg += `📦 Name: ${product.name} → ${freshProduct.name}\n`;
           }
           if (editRequest.updates.price) {
-            confirmMsg += `💰 Price: $${freshProduct.regular_price || editRequest.updates.price}\n`;
+            const oldPrice = product.price || "N/A";
+            const newPrice = freshProduct.regular_price || editRequest.updates.price;
+            confirmMsg += `💰 Price: $${oldPrice} → $${newPrice}\n`;
           }
           if (editRequest.updates.description) {
             confirmMsg += `📝 Description updated\n`;
           }
           
+          confirmMsg += `\n✨ Changes are live on your website!`;
+          
           await sendWhatsAppMessage(from, confirmMsg);
           return; // Don't process as natural language chat
+        } else {
+          await sendWhatsAppMessage(from, `⚠️ Update returned status ${response.status}. Check WooCommerce.`);
+          return;
         }
       } catch (err) {
-        console.error("[WhatsApp] Natural language edit error:", err.response?.data || err.message);
-        await sendWhatsAppMessage(from, `Hmm, I had trouble updating that. ${err.response?.data?.message || err.message}`);
+        console.error("[WhatsApp] Natural language edit error:", {
+          status: err.response?.status,
+          data: err.response?.data,
+          message: err.message
+        });
+        
+        let errorMsg = "❌ Couldn't update that.";
+        if (err.response?.status === 404) {
+          errorMsg = `❌ Product not found in WooCommerce. It may have been deleted.`;
+        } else if (err.response?.status === 401) {
+          errorMsg = `❌ Permission denied. Check API key permissions.`;
+        } else if (err.response?.data?.message) {
+          errorMsg = `❌ ${err.response.data.message}`;
+        } else {
+          errorMsg = `❌ ${err.message || "Unknown error"}`;
+        }
+        
+        addToConversationHistory(from, "assistant", errorMsg);
+        await sendWhatsAppMessage(from, errorMsg);
+        return;
+      }
+    }
+    
+    // Handle follow-up to candidate selection
+    const ctx = getConversationContext(from);
+    if (ctx.candidates && messageText.match(/^\d+$/)) {
+      const index = parseInt(messageText) - 1;
+      if (index >= 0 && index < ctx.candidates.length) {
+        const selectedProduct = ctx.candidates[index];
+        ctx.candidates = null;
+        updateConversationContext(from, selectedProduct, "selected");
+        const responseMsg = `Got it! Selected "${selectedProduct.name}". What would you like to change?`;
+        addToConversationHistory(from, "assistant", responseMsg);
+        await sendWhatsAppMessage(from, responseMsg);
         return;
       }
     }
@@ -678,8 +1021,13 @@ async function handleIncomingWhatsAppMessage(message, contact) {
 // Handle natural language queries with real data integration
 async function handleNaturalLanguageChat(from, messageText) {
   try {
+    // Add user message to conversation history
+    addToConversationHistory(from, "user", messageText);
+    
     const companyContext = loadCompanyContext();
     const pastConversations = loadConversations();
+    const conversationHistory = getConversationHistoryForPrompt(from, 10); // Last 10 messages
+    const ctx = getConversationContext(from);
     const lowerMessage = messageText.toLowerCase();
     
     // Detect what the user is asking about
@@ -868,11 +1216,18 @@ async function handleNaturalLanguageChat(from, messageText) {
     systemPrompt += "\nFor product edits: When users say things like 'change the name to X' or 'update price to Y', you can acknowledge it but DON'T explain commands - the system will handle it automatically. Just respond naturally like 'Got it! Updating that for you...' or 'Done! Changed the name to X.'";
     systemPrompt += "\nBe proactive and action-oriented - if they want to change something, acknowledge it warmly and let them know it's being done. Don't give instructions unless they explicitly ask how to do something.";
     systemPrompt += "\nKeep responses conversational and brief - like texting a friend, not a manual.";
+    systemPrompt += "\n\nIMPORTANT: Remember what we've been discussing in this conversation. Reference previous messages naturally when relevant. If the user refers to something mentioned earlier (like 'that product', 'the campaign we discussed', 'the one I mentioned'), use the conversation history to understand what they mean.";
     
     if (detectedIntent) {
       systemPrompt += `\n\nUser intent detected: ${detectedIntent}`;
     }
     
+    // Add conversation history to system prompt
+    if (conversationHistory) {
+      systemPrompt += conversationHistory;
+    }
+    
+    // Build messages array with conversation history
     const messages = [
       {
         role: "system",
@@ -880,14 +1235,23 @@ async function handleNaturalLanguageChat(from, messageText) {
       }
     ];
     
-    if (pastConversations.length > 0) {
-      const recent = pastConversations.slice(-3);
-      messages.push({
-        role: "system",
-        content: `Previous conversation context: ${recent.map(c => `Q: ${c.user} A: ${c.assistant}`).join(" | ")}`
+    // Add recent conversation history as message history (better for AI context)
+    if (userConversations.has(from)) {
+      const history = userConversations.get(from);
+      const recentHistory = history.slice(-8); // Last 8 messages (4 exchanges)
+      
+      // Add history messages before the current one
+      recentHistory.forEach(msg => {
+        if (msg.role === "user" || msg.role === "assistant") {
+          messages.push({
+            role: msg.role,
+            content: msg.content
+          });
+        }
       });
     }
     
+    // Add current user message
     messages.push({ role: "user", content: messageText });
 
     const completion = await openai.chat.completions.create({
@@ -900,7 +1264,13 @@ async function handleNaturalLanguageChat(from, messageText) {
     });
 
     const aiResponse = completion.choices[0].message.content;
+    
+    // Add assistant response to conversation history
+    addToConversationHistory(from, "assistant", aiResponse);
+    
+    // Also save to global conversation log
     saveConversation(messageText, aiResponse);
+    
     await sendWhatsAppMessage(from, aiResponse);
     
   } catch (err) {
@@ -1726,24 +2096,31 @@ async function handleAlerts(from, action) {
 
 async function handleProducts(from) {
   try {
-    const products = await wooFetch("GET", "/products?per_page=50");
+    // Use cache for faster response
+    const products = await getProductsCache();
     
     if (!products || products.length === 0) {
       await sendWhatsAppMessage(from, "📦 No products found in WooCommerce.\n\nMake sure:\n• WooCommerce is set up\n• Products exist in your store\n• API credentials are correct");
       return;
     }
     
+    // Normalize and store in context for "number X" references
+    const normalizedList = products.slice(0, 10).map(p => normalizeProduct(p));
+    const ctx = getConversationContext(from);
+    ctx.lastProductList = normalizedList;
+    
     let msg = `📦 Products (${products.length}):\n\n`;
-    products.slice(0, 10).forEach((p, i) => {
-      const normalized = normalizeProduct(p);
-      const name = normalized.name || "Unnamed";
-      const price = normalized.price ? `$${normalized.price}` : "N/A";
-      const desc = (normalized.description || normalized.short_description || "").substring(0, 50);
+    normalizedList.forEach((p, i) => {
+      const name = p.name || "Unnamed";
+      const price = p.price ? `$${p.price}` : "N/A";
+      const desc = (p.description || p.short_description || "").substring(0, 50);
       msg += `${i + 1}. ${name}\n💰 ${price}${desc ? `\n${desc}...` : ""}\n\n`;
     });
     
     if (products.length > 10) {
-      msg += `...and ${products.length - 10} more\n\nUse /product <name> for details\nOr /product edit <name> to manage`;
+      msg += `...and ${products.length - 10} more\n\nUse /product <name> for details\nOr say "change product number X name to Y" to edit`;
+    } else {
+      msg += `💡 Tip: Say "change product number X name to Y" to edit`;
     }
     
     await sendWhatsAppMessage(from, msg);
@@ -1887,12 +2264,26 @@ async function handleProduct(from, params) {
     
     // Handle info command or default to showing product info
     const searchName = action === "info" ? productParams.slice(1).join(" ") : productParams.join(" ");
-    const product = await findProductByName(searchName);
+    const product = await findProductByName(searchName, true);
     
     if (!product) {
-      await sendWhatsAppMessage(from, `❌ Product not found: ${searchName}\n\nUse /products to see all products.`);
+      // Try to find candidates for better UX
+      const candidates = await findProductCandidates(searchName, 3);
+      if (candidates.length > 0) {
+        let msg = `❌ Product "${searchName}" not found.\n\nDid you mean:\n\n`;
+        candidates.forEach((c, i) => {
+          msg += `${i + 1}. ${c.name}\n`;
+        });
+        msg += `\nReply with the number or use /product <exact name>`;
+        await sendWhatsAppMessage(from, msg);
+      } else {
+        await sendWhatsAppMessage(from, `❌ Product not found: ${searchName}\n\nUse /products to see all products.`);
+      }
       return;
     }
+    
+    // Update conversation context
+    updateConversationContext(from, product, "view");
     
     const productName = product.name || "Unnamed";
     const price = product.price ? `$${product.price}` : "N/A";
@@ -3146,6 +3537,10 @@ app.get("/api/creatives/last", requireAdminKey, (req, res) => {
     res.status(500).json({ ok: false, error: err.message });
   }
 });
+
+// Mount new routes
+app.use("/api/media", mediaRoutes);
+app.use("/webhooks/whatsapp", whatsappWebhookRoutes);
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`✅ Backend on http://localhost:${PORT}`));
