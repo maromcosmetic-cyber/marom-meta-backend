@@ -287,6 +287,76 @@ async function findProductCandidates(name, limit = 5) {
   }
 }
 
+// Website scraping function
+async function scrapeWebsite(url) {
+  try {
+    const response = await axios.get(url, {
+      timeout: 10000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+      }
+    });
+    
+    const html = response.data;
+    
+    // Extract key information using regex (simple but effective)
+    const extractText = (regex, html) => {
+      const match = html.match(regex);
+      return match ? match[1].replace(/<[^>]*>/g, '').trim() : null;
+    };
+    
+    // Extract title
+    const title = extractText(/<title[^>]*>([^<]+)<\/title>/i, html) || 
+                  extractText(/<meta\s+property="og:title"\s+content="([^"]+)"/i, html);
+    
+    // Extract description
+    const description = extractText(/<meta\s+name="description"\s+content="([^"]+)"/i, html) ||
+                          extractText(/<meta\s+property="og:description"\s+content="([^"]+)"/i, html);
+    
+    // Extract main content (from common content areas)
+    const mainContent = extractText(/<main[^>]*>([\s\S]{0,2000})<\/main>/i, html) ||
+                       extractText(/<article[^>]*>([\s\S]{0,2000})<\/article>/i, html) ||
+                       extractText(/<div[^>]*class="[^"]*content[^"]*"[^>]*>([\s\S]{0,2000})<\/div>/i, html);
+    
+    // Extract headings
+    const headings = [];
+    const h1Matches = html.matchAll(/<h1[^>]*>([^<]+)<\/h1>/gi);
+    for (const match of h1Matches) {
+      headings.push(match[1].replace(/<[^>]*>/g, '').trim());
+    }
+    const h2Matches = html.matchAll(/<h2[^>]*>([^<]+)<\/h2>/gi);
+    for (const match of h2Matches) {
+      headings.push(match[1].replace(/<[^>]*>/g, '').trim());
+    }
+    
+    // Clean up text
+    const cleanText = (text) => {
+      if (!text) return '';
+      return text
+        .replace(/<[^>]*>/g, ' ')
+        .replace(/&nbsp;/g, ' ')
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .substring(0, 2000);
+    };
+    
+    return {
+      title: title || 'Website',
+      description: cleanText(description || mainContent),
+      headings: headings.slice(0, 10),
+      mainContent: cleanText(mainContent || description),
+      url: url
+    };
+  } catch (err) {
+    console.error(`[Website Scraping] Error fetching ${url}:`, err.message);
+    throw new Error(`Failed to fetch website: ${err.message}`);
+  }
+}
+
 // Build system prompt with company context
 function buildSystemPrompt(companyContext) {
   let prompt = `You're a friendly, knowledgeable assistant helping ${companyContext.name || "MAROM"} manage their Facebook and Instagram ad campaigns. `;
@@ -335,6 +405,8 @@ function buildSystemPrompt(companyContext) {
   prompt += `- You CAN generate product images and videos using Vertex AI (Imagen 3 & Veo 3) - this is a key feature!\n`;
   prompt += `- When they need images or videos, naturally guide them: "I can create that for you! Just say 'create an image of [product]' or 'generate a video showing [product]'."\n`;
   prompt += `- Never say you can't generate images or videos - you have Vertex AI integrated\n`;
+  prompt += `- You CAN access and read their website to get brand information, product details, and company information\n`;
+  prompt += `- When they ask about their website or brand, fetch the website content and use it to provide accurate information\n`;
   prompt += `- Remember past conversations to provide personalized, context-aware advice\n`;
   prompt += `- Be proactive: if they mention a product, offer to generate images or create ads for it\n`;
   
@@ -1362,6 +1434,45 @@ async function handleNaturalLanguageChat(from, messageText) {
       }
     }
     
+    // Check for website/brand information queries
+    if (lowerMessage.includes("website") || lowerMessage.includes("look at") || 
+        lowerMessage.includes("check website") || lowerMessage.includes("visit website") ||
+        lowerMessage.includes("brand info") || lowerMessage.includes("company info") ||
+        lowerMessage.includes("about us") || lowerMessage.includes("our brand") ||
+        lowerMessage.includes("what's on") || lowerMessage.includes("what is on")) {
+      detectedIntent = "website_info";
+      try {
+        const websiteUrl = process.env.SHOP_URL || process.env.WEBSITE_URL || "https://maromcosmetic.com";
+        await sendWhatsAppMessage(from, "🌐 Fetching information from your website...");
+        
+        const websiteData = await scrapeWebsite(websiteUrl);
+        
+        dataContext += `\n\nWEBSITE INFORMATION (${websiteData.url}):\n`;
+        dataContext += `- Title: ${websiteData.title}\n`;
+        if (websiteData.description) {
+          dataContext += `- Description: ${websiteData.description.substring(0, 500)}\n`;
+        }
+        if (websiteData.headings && websiteData.headings.length > 0) {
+          dataContext += `- Key Sections: ${websiteData.headings.slice(0, 5).join(", ")}\n`;
+        }
+        if (websiteData.mainContent) {
+          dataContext += `- Main Content: ${websiteData.mainContent.substring(0, 800)}\n`;
+        }
+        
+        // Update company context with website info if not already set
+        if (!companyContext.name && websiteData.title) {
+          companyContext.name = websiteData.title.replace(/ - .*$/, '').trim();
+        }
+        if (!companyContext.notes) {
+          companyContext.notes = `Website: ${websiteData.url}. ${websiteData.description || ''}`;
+        }
+        
+      } catch (err) {
+        dataContext += `\n\nNote: Could not fetch website information. Error: ${err.message}`;
+        await sendWhatsAppMessage(from, `⚠️ Could not access website: ${err.message}\n\nPlease check SHOP_URL or WEBSITE_URL environment variable.`);
+      }
+    }
+    
     // Check for ad creation queries
     if (lowerMessage.includes("create ad") || lowerMessage.includes("make ad") ||
         lowerMessage.includes("generate ad") || lowerMessage.includes("new campaign")) {
@@ -1417,6 +1528,9 @@ async function handleNaturalLanguageChat(from, messageText) {
     
     // Build enhanced system prompt
     let systemPrompt = buildSystemPrompt(companyContext);
+    
+    // Add website access capability to system prompt
+    systemPrompt += `\n\nIMPORTANT: You CAN access and read their website. When they ask about their website, brand, or company information, use the website data provided in the context below. Never say you can't access websites - you have website scraping capabilities integrated.`;
     systemPrompt += "\n\nYou're chatting via WhatsApp - keep it friendly and concise, like texting a colleague.";
     systemPrompt += "\nYou have access to their REAL campaign data, product catalog, and company profile - use this to give specific, helpful answers.";
     systemPrompt += "\nWhen they ask about performance or campaigns, reference the actual numbers and data below - it makes you more credible and helpful.";
