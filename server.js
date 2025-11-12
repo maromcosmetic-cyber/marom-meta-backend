@@ -759,6 +759,37 @@ async function createCampaignStructure(adAccountId, campaignData) {
 }
 
 // Health
+// Serve campaigns HTML page
+app.get("/campaigns", (req, res) => {
+  try {
+    // Try both with and without .html extension
+    const campaignsPath = path.join(__dirname, "campaigns.html");
+    const campaignsPathNoExt = path.join(__dirname, "campaigns");
+    
+    let filePath = null;
+    if (fs.existsSync(campaignsPath)) {
+      filePath = campaignsPath;
+    } else if (fs.existsSync(campaignsPathNoExt)) {
+      filePath = campaignsPathNoExt;
+    }
+    
+    if (filePath) {
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
+      res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+      res.setHeader("Pragma", "no-cache");
+      res.setHeader("Expires", "0");
+      res.sendFile(filePath);
+      console.log("[Server] Served campaigns page from:", filePath);
+    } else {
+      console.error("[Server] Campaigns file not found. Tried:", campaignsPath, "and", campaignsPathNoExt);
+      res.status(404).send("Campaigns page not found");
+    }
+  } catch (err) {
+    console.error("[Server] Error serving campaigns page:", err);
+    res.status(500).send("Error loading campaigns page: " + err.message);
+  }
+});
+
 app.get("/health", (_,res) => res.json({ ok: true }));
 
 // WhatsApp webhook verification (GET)
