@@ -5235,7 +5235,7 @@ app.get("/api/audiences", requireAdminKey, (req, res) => {
 
 app.post("/api/audiences", requireAdminKey, (req, res) => {
   try {
-    const { name, ageMin, ageMax, gender, locations, interests, behaviors } = req.body;
+    const { name, ageMin, ageMax, gender, locationData, locations, interests, behaviors } = req.body;
     
     if (!name || name.trim() === '') {
       return res.status(400).json({ error: "Audience name is required" });
@@ -5250,6 +5250,8 @@ app.post("/api/audiences", requireAdminKey, (req, res) => {
       ageMin: ageMin || null,
       ageMax: ageMax || null,
       gender: gender || "",
+      locationData: locationData || (locations ? { type: 'countries', countries: locations } : null),
+      // Legacy support
       locations: locations || "",
       interests: interests || "",
       behaviors: behaviors || "",
@@ -5271,7 +5273,7 @@ app.post("/api/audiences", requireAdminKey, (req, res) => {
 app.put("/api/audiences/:id", requireAdminKey, (req, res) => {
   try {
     const { id } = req.params;
-    const { name, ageMin, ageMax, gender, locations, interests, behaviors } = req.body;
+    const { name, ageMin, ageMax, gender, locationData, locations, interests, behaviors } = req.body;
     
     if (!name || name.trim() === '') {
       return res.status(400).json({ error: "Audience name is required" });
@@ -5290,7 +5292,9 @@ app.put("/api/audiences/:id", requireAdminKey, (req, res) => {
       ageMin: ageMin || null,
       ageMax: ageMax || null,
       gender: gender || "",
-      locations: locations || "",
+      locationData: locationData || (locations ? { type: 'countries', countries: locations } : audiences[index].locationData),
+      // Legacy support
+      locations: locations || audiences[index].locations || "",
       interests: interests || "",
       behaviors: behaviors || "",
       updatedAt: new Date().toISOString()
