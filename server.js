@@ -3155,11 +3155,22 @@ async function checkImageConfig() {
   let vertexAvailable = false;
   
   // Check for Vertex AI credentials (supports both file path and individual env vars)
-  const hasVertexCredentials = (
-    process.env.GOOGLE_CLOUD_PROJECT && 
-    (process.env.GOOGLE_APPLICATION_CREDENTIALS || 
-     (process.env.GOOGLE_PRIVATE_KEY && process.env.GOOGLE_CLIENT_EMAIL))
-  );
+  // Check for non-empty values (not just truthy)
+  const hasProject = !!(process.env.GOOGLE_CLOUD_PROJECT && process.env.GOOGLE_CLOUD_PROJECT.trim());
+  const hasCredentialsFile = !!(process.env.GOOGLE_APPLICATION_CREDENTIALS && process.env.GOOGLE_APPLICATION_CREDENTIALS.trim());
+  const hasPrivateKey = !!(process.env.GOOGLE_PRIVATE_KEY && process.env.GOOGLE_PRIVATE_KEY.trim());
+  const hasClientEmail = !!(process.env.GOOGLE_CLIENT_EMAIL && process.env.GOOGLE_CLIENT_EMAIL.trim());
+  const hasEnvVars = hasPrivateKey && hasClientEmail;
+  
+  const hasVertexCredentials = hasProject && (hasCredentialsFile || hasEnvVars);
+  
+  // Debug logging
+  console.log("[Image Config] Checking configuration:");
+  console.log(`  GOOGLE_CLOUD_PROJECT: ${hasProject ? '✓' : '✗'}`);
+  console.log(`  GOOGLE_APPLICATION_CREDENTIALS: ${hasCredentialsFile ? '✓' : '✗'}`);
+  console.log(`  GOOGLE_PRIVATE_KEY: ${hasPrivateKey ? '✓' : '✗'}`);
+  console.log(`  GOOGLE_CLIENT_EMAIL: ${hasClientEmail ? '✓' : '✗'}`);
+  console.log(`  Has credentials: ${hasVertexCredentials ? '✓' : '✗'}`);
   
   if (hasVertexCredentials) {
     try {
@@ -3191,15 +3202,27 @@ async function checkImageConfig() {
         }
       } else {
         console.warn(`[Image Config] Vertex AI module not found in any of these paths: ${possiblePaths.join(", ")}`);
+        console.warn(`[Image Config] Current working directory: ${process.cwd()}`);
+        console.warn(`[Image Config] __dirname: ${__dirname}`);
         vertexAvailable = false;
       }
     } catch (importErr) {
       console.warn("[Image Config] Vertex AI module not available:", importErr.message);
       vertexAvailable = false;
     }
+  } else {
+    console.warn("[Image Config] Missing Vertex AI credentials. Required:");
+    if (!hasProject) console.warn("  - GOOGLE_CLOUD_PROJECT");
+    if (!hasCredentialsFile && !hasEnvVars) {
+      console.warn("  - Either GOOGLE_APPLICATION_CREDENTIALS (file path)");
+      console.warn("  - Or both GOOGLE_PRIVATE_KEY + GOOGLE_CLIENT_EMAIL");
+    } else if (!hasEnvVars && hasCredentialsFile) {
+      console.warn("  - GOOGLE_APPLICATION_CREDENTIALS is set, but file may not exist");
+    }
   }
   
   if (vertexAvailable) {
+    console.log("[Image Config] ✓ Vertex AI configured and ready");
     return "vertex";
   }
   
