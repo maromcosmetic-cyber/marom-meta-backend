@@ -1507,6 +1507,9 @@ async function handleNaturalLanguageChat(from, messageText) {
     if (isImageRequest || isVideoRequest) {
       detectedIntent = "content_generation";
       
+      // Flag to track if we're generating media (to prevent AI response)
+      let isGeneratingMedia = false;
+      
       // Try to extract product name from message
       let productName = null;
       
@@ -1536,11 +1539,22 @@ async function handleNaturalLanguageChat(from, messageText) {
         }
       }
       
+      // Handle multi-word products like "mosquito repellent"
+      if (lowerMessage.includes("mosquito") && lowerMessage.includes("repellent")) {
+        productName = "mosquito repellent";
+      }
+      
+      console.log(`[Natural Language] Detected ${isImageRequest ? 'image' : 'video'} request, extracted productName: "${productName}"`);
+      
       // If we found a product, actually generate the media
       if (productName) {
         try {
+          console.log(`[Natural Language] Looking up product: "${productName}"`);
           const product = await findProductByName(productName, true);
+          console.log(`[Natural Language] Product lookup result:`, product ? `Found: ${product.name} (ID: ${product.id})` : 'Not found');
+          
           if (product) {
+            isGeneratingMedia = true; // Set flag before starting generation
             // Actually trigger generation instead of just responding
             if (isVideoRequest) {
               // Generate video
@@ -1549,16 +1563,33 @@ async function handleNaturalLanguageChat(from, messageText) {
               const session = getSession(from);
               const companyContext = loadCompanyContext();
               
-              // Build enhanced prompt
+              // Build enhanced prompt (with fallback for rate limits)
               const basePrompt = `UGC style video showcasing ${product.name}, natural lighting, authentic feel`;
-              const enhancedPrompt = await enhanceImagePrompt(
-                basePrompt,
-                product,
-                companyContext,
-                session,
-                null,
-                null
-              );
+              let enhancedPrompt;
+              try {
+                enhancedPrompt = await enhanceImagePrompt(
+                  basePrompt,
+                  product,
+                  companyContext,
+                  session,
+                  null,
+                  null
+                );
+              } catch (err) {
+                if (err.message.includes("Rate limit") || err.message.includes("429")) {
+                  console.warn("[Video Generation] Rate limit hit, using fallback prompt");
+                  enhancedPrompt = buildEnhancedPromptFallback(
+                    basePrompt,
+                    product,
+                    companyContext,
+                    session,
+                    null,
+                    null
+                  );
+                } else {
+                  throw err;
+                }
+              }
               
               await sendWhatsAppMessage(from, `✨ Generating video with enhanced prompt...`);
               
@@ -1614,8 +1645,23 @@ async function handleNaturalLanguageChat(from, messageText) {
               const session = getSession(from);
               const companyContext = loadCompanyContext();
               
-              // Build enhanced prompt using AI with brand/product data
-              const prompt = await buildEnhancedImagePrompt(product, session, companyContext);
+              // Build enhanced prompt using AI with brand/product data (with fallback)
+              let prompt;
+              try {
+                prompt = await buildEnhancedImagePrompt(product, session, companyContext);
+              } catch (err) {
+                if (err.message.includes("Rate limit") || err.message.includes("429")) {
+                  console.warn("[Image Generation] Rate limit hit, using fallback prompt");
+                  prompt = buildEnhancedPromptFallback(
+                    `create image for ${product.name}`,
+                    product,
+                    companyContext,
+                    session
+                  );
+                } else {
+                  throw err;
+                }
+              }
               
               await sendWhatsAppMessage(from, `✨ Generating image with enhanced prompt...`);
               
@@ -1639,14 +1685,62 @@ async function handleNaturalLanguageChat(from, messageText) {
               return;
             }
           } else {
-            // Product not found - let AI handle it
-            dataContext += `\n\nNote: Could not find product "${productName}". Available products listed below.`;
+            // Product not found - try fuzzy search with full phrase
+            console.log(`[Natural Language] Product "${productName}" not found, trying fuzzy search...`);
+            const candidates = await findProductCandidates(productName, 3);
+            if (candidates.length > 0) {
+              console.log(`[Natural Language] Found ${candidates.length} candidates, using first: ${candidates[0].name}`);
+              const product = candidates[0];
+              
+              // Generate image with found product
+              await sendWhatsAppMessage(from, `🎨 Creating optimized prompt...`);
+              
+              const session = getSession(from);
+              const companyContext = loadCompanyContext();
+              
+              let prompt;
+              try {
+                prompt = await buildEnhancedImagePrompt(product, session, companyContext);
+              } catch (err) {
+                if (err.message.includes("Rate limit") || err.message.includes("429")) {
+                  console.warn("[Image Generation] Rate limit hit, using fallback prompt");
+                  prompt = buildEnhancedPromptFallback(
+                    `create image for ${product.name}`,
+                    product,
+                    companyContext,
+                    session
+                  );
+                } else {
+                  throw err;
+                }
+              }
+              
+              await sendWhatsAppMessage(from, `✨ Generating image with enhanced prompt...`);
+              
+              const imageBuffer = await generateImageWithEngine(prompt, "1:1", 1024, 1024);
+              const mediaId = await uploadWhatsAppMedia(imageBuffer, "image/jpeg");
+              
+              const caption = `✨ Image generated!\n\n📦 ${product.name}\n📐 Angle: ${session.angle}\n\n💡 Reply:\n• "use" - Use in campaign\n• "edit" - Edit this image\n• "make video" - Create video version\n• "regenerate" - Create another`;
+              
+              await sendWhatsAppImage(from, mediaId, caption);
+              addToHistory(from, mediaId, caption, product.name, session.angle, session.style);
+              
+              console.log(`[Natural Language] Generated image for ${from}: ${product.name}, media_id: ${mediaId}`);
+              return; // Don't continue to AI chat
+            } else {
+              // Product not found - let AI handle it
+              console.log(`[Natural Language] No product candidates found for "${productName}"`);
+              dataContext += `\n\nNote: Could not find product "${productName}". Available products listed below.`;
+            }
           }
         } catch (err) {
           console.error("[Natural Language] Media generation error:", err);
+          console.error("[Natural Language] Error stack:", err.stack);
           await sendWhatsAppMessage(from, `⚠️ Failed to generate: ${err.message}\n\nTrying alternative approach...`);
           // Continue to AI chat for fallback
         }
+      } else {
+        console.log(`[Natural Language] No product name extracted from message: "${messageText}"`);
       }
       
       // Provide context for AI if generation didn't happen
@@ -1663,7 +1757,21 @@ async function handleNaturalLanguageChat(from, messageText) {
       } catch (err) {
         dataContext += `\n\nNote: Could not fetch products. Error: ${err.message}`;
       }
-      dataContext += `\n\nIMPORTANT: When user requests image/video generation, you should acknowledge enthusiastically and confirm the generation is happening. The system will automatically generate and send the media.`;
+      // If we're generating media, don't let AI respond - we'll handle it
+      if ((isImageRequest || isVideoRequest) && isGeneratingMedia) {
+        // Media generation is in progress - skip AI response
+        console.log(`[Natural Language] Media generation in progress, skipping AI response`);
+        return; // Exit early - generation code will handle the response
+      }
+      
+      if (isImageRequest || isVideoRequest) {
+        // Only add context if generation didn't happen (product not found)
+        if (!productName) {
+          dataContext += `\n\nIMPORTANT: User requested ${isImageRequest ? 'image' : 'video'} generation but no product was identified. List available products and ask which one they want.`;
+        }
+      } else {
+        dataContext += `\n\nIMPORTANT: When user requests image/video generation, you should acknowledge enthusiastically and confirm the generation is happening. The system will automatically generate and send the media.`;
+      }
     }
     
     // Build enhanced system prompt
@@ -1718,16 +1826,31 @@ async function handleNaturalLanguageChat(from, messageText) {
     // Add current user message
     messages.push({ role: "user", content: messageText });
 
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: messages,
-      temperature: 0.8, // Higher temperature for more natural, varied responses
-      max_tokens: 600,
-      presence_penalty: 0.3, // Encourage more varied vocabulary
-      frequency_penalty: 0.2 // Reduce repetition
-    });
-
-    const aiResponse = completion.choices[0].message.content;
+    let aiResponse;
+    try {
+      // Try primary model first, with fallback
+      const completion = await openaiWithFallback({
+        model: "gpt-4o-mini",
+        messages: messages,
+        temperature: 0.8, // Higher temperature for more natural, varied responses
+        max_tokens: 600,
+        presence_penalty: 0.3, // Encourage more varied vocabulary
+        frequency_penalty: 0.2 // Reduce repetition
+      });
+      aiResponse = completion.choices[0].message.content;
+    } catch (err) {
+      // If both models fail, use static response
+      console.warn("[OpenAI] Both models failed, using static response");
+      aiResponse = "I'm experiencing high API demand right now. Let me try a simpler approach...\n\n" +
+        "For image/video generation, please use:\n" +
+        "• /image <product> - Generate single image\n" +
+        "• /images <product> - Generate image pack\n" +
+        "• /video <product> - Generate video\n\n" +
+        "For campaign management:\n" +
+        "• /campaigns - List campaigns\n" +
+        "• /stats - View performance\n" +
+        "• /help - Full command list";
+    }
     
     // Add assistant response to conversation history
     addToConversationHistory(from, "assistant", aiResponse);
@@ -2320,7 +2443,7 @@ async function handleIdeas(from, product) {
       productContext = `\n\nProduct Details:\n- Name: ${productData.name || product}\n- Description: ${productData.description || productData.short_description || "N/A"}\n- Price: ${productData.price ? `$${productData.price}` : "N/A"}`;
     }
     
-    const completion = await openai.chat.completions.create({
+    const completion = await openaiWithFallback({
       model: "gpt-4o-mini",
       messages: [
         {
@@ -2362,7 +2485,7 @@ async function handleCopy(from, product) {
       productContext = `\n\nProduct Details:\n- Name: ${productData.name || product}\n- Description: ${productData.description || productData.short_description || "N/A"}\n- Price: ${productData.price ? `$${productData.price}` : "N/A"}`;
     }
     
-    const completion = await openai.chat.completions.create({
+    const completion = await openaiWithFallback({
       model: "gpt-4o-mini",
       messages: [
         {
@@ -2403,7 +2526,7 @@ async function handleAudience(from, product) {
       productContext = `\n\nProduct Details:\n- Name: ${productData.name || product}\n- Description: ${productData.description || productData.short_description || "N/A"}\n- Price: ${productData.price ? `$${productData.price}` : "N/A"}`;
     }
     
-    const completion = await openai.chat.completions.create({
+    const completion = await openaiWithFallback({
       model: "gpt-4o-mini",
       messages: [
         {
@@ -2455,7 +2578,7 @@ async function handleCreateAd(from, params) {
     const audiencePrompt = buildSystemPrompt(companyContext) + " Generate audience targeting.";
     
     const [copyRes, audienceRes] = await Promise.all([
-      openai.chat.completions.create({
+      openaiWithFallback({
         model: "gpt-4o-mini",
         messages: [
           { role: "system", content: copyPrompt },
@@ -2463,7 +2586,7 @@ async function handleCreateAd(from, params) {
         ],
         response_format: { type: "json_object" }
       }),
-      openai.chat.completions.create({
+      openaiWithFallback({
         model: "gpt-4o-mini",
         messages: [
           { role: "system", content: audiencePrompt },
@@ -3095,9 +3218,70 @@ async function generateImageWithEngine(prompt, aspectRatio = "1:1", width = 1024
 }
 
 // Build image prompt
+// Prompt cache to reduce API calls
+const promptCache = new Map(); // key -> { prompt, timestamp }
+const PROMPT_CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours
+
+// Generate cache key for prompt enhancement
+function getPromptCacheKey(product, angle, style, companyContext) {
+  const productId = product?.id || product?.name || "unknown";
+  const angleKey = angle || "default";
+  const styleKey = style || "default";
+  const brandKey = companyContext?.name || "default";
+  return `${productId}-${angleKey}-${styleKey}-${brandKey}`;
+}
+
+// Helper function to call OpenAI with fallback model support
+async function openaiWithFallback(config) {
+  const { model = "gpt-4o-mini", messages, temperature = 0.8, max_tokens = 600, ...otherOptions } = config;
+  
+  try {
+    // Try primary model first
+    const response = await openai.chat.completions.create({
+      model: model,
+      messages: messages,
+      temperature: temperature,
+      max_tokens: max_tokens,
+      ...otherOptions
+    });
+    return response;
+  } catch (err) {
+    // Check if it's a rate limit error - try fallback model
+    if (err.message.includes("Rate limit") || err.message.includes("429") || err.status === 429) {
+      console.warn(`[OpenAI] Rate limit on ${model}, trying fallback model gpt-3.5-turbo`);
+      try {
+        const fallbackResponse = await openai.chat.completions.create({
+          model: "gpt-3.5-turbo",
+          messages: messages,
+          temperature: temperature,
+          max_tokens: max_tokens,
+          ...otherOptions
+        });
+        console.log(`[OpenAI] Successfully used fallback model gpt-3.5-turbo`);
+        return fallbackResponse;
+      } catch (fallbackErr) {
+        // If fallback also fails, throw the original error
+        console.error(`[OpenAI] Fallback model also failed: ${fallbackErr.message}`);
+        throw err; // Throw original error
+      }
+    } else {
+      // Re-throw if not a rate limit error
+      throw err;
+    }
+  }
+}
+
 // AI Prompt Enhancer - Creates optimized prompts using brand/product data
 async function enhanceImagePrompt(userPrompt, product, companyContext, session, angle = null, style = null) {
   try {
+    // Check cache first
+    const cacheKey = getPromptCacheKey(product, angle || session?.angle, style || session?.style, companyContext);
+    const cached = promptCache.get(cacheKey);
+    if (cached && Date.now() - cached.timestamp < PROMPT_CACHE_TTL) {
+      console.log(`[Prompt Enhancer] Using cached prompt for ${cacheKey}`);
+      return cached.prompt;
+    }
+    
     // Build context for prompt enhancement
     let contextInfo = "";
     
@@ -3162,32 +3346,78 @@ Create an enhanced, detailed prompt that:
 
 Return ONLY the enhanced prompt text (no explanations, no markdown, just the prompt). Keep it concise but detailed (2-4 sentences max).`;
 
-    const response = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [
-        {
-          role: "system",
-          content: "You are an expert product photography prompt engineer. Create detailed, professional prompts optimized for AI image generation."
-        },
-        {
-          role: "user",
-          content: enhancementPrompt
-        }
-      ],
-      temperature: 0.8,
-      max_tokens: 300
-    });
+    // Try primary model first, with fallback
+    let response;
+    try {
+      response = await openaiWithFallback({
+        model: "gpt-4o-mini",
+        messages: [
+          {
+            role: "system",
+            content: "You are an expert product photography prompt engineer. Create detailed, professional prompts optimized for AI image generation."
+          },
+          {
+            role: "user",
+            content: enhancementPrompt
+          }
+        ],
+        temperature: 0.8,
+        max_tokens: 300
+      });
+    } catch (err) {
+      // If both models fail, use template builder
+      console.warn("[Prompt Enhancer] Both models failed, using template builder");
+      return buildEnhancedPromptFallback(userPrompt, product, companyContext, session, angle, style);
+    }
     
     const enhancedPrompt = response.choices[0].message.content.trim();
     console.log(`[Prompt Enhancer] Enhanced: "${userPrompt}" → "${enhancedPrompt}"`);
+    
+    // Cache the result
+    promptCache.set(cacheKey, { prompt: enhancedPrompt, timestamp: Date.now() });
     
     return enhancedPrompt;
     
   } catch (err) {
     console.error("[Prompt Enhancer] Error:", err.message);
-    // Fallback to original prompt if enhancement fails
-    return userPrompt;
+    
+    // Final fallback to template builder
+    return buildEnhancedPromptFallback(userPrompt, product, companyContext, session, angle, style);
   }
+}
+
+// Fallback prompt builder (no AI, uses templates)
+function buildEnhancedPromptFallback(userPrompt, product, companyContext, session, angle = null, style = null) {
+  const selectedAngle = angle || session?.angle || "front";
+  const selectedStyle = style || session?.style || "clean studio, premium cosmetics look";
+  const brandName = companyContext?.name || "MAROM";
+  const productName = product?.name || "product";
+  
+  let prompt = `Professional product photography of ${brandName} ${productName}`;
+  
+  // Add angle description
+  if (ANGLE_PRESETS[selectedAngle]) {
+    prompt += `, ${ANGLE_PRESETS[selectedAngle]}`;
+  }
+  
+  // Add style
+  prompt += `, ${selectedStyle}`;
+  
+  // Add product context if available
+  if (product?.description) {
+    const desc = product.description.substring(0, 100).replace(/<[^>]*>/g, '');
+    prompt += `. Product features: ${desc}`;
+  }
+  
+  // Add brand context
+  if (companyContext?.brandValues) {
+    prompt += `. Brand aesthetic: ${companyContext.brandValues.substring(0, 100)}`;
+  }
+  
+  // Add quality keywords
+  prompt += `. Premium e-commerce photography, high quality, sharp focus, professional lighting, clean background, no text, no watermarks`;
+  
+  return prompt;
 }
 
 // Build base image prompt (simple version)
@@ -3771,7 +4001,7 @@ app.post("/api/ai/audience", async (req, res) => {
     const companyContext = loadCompanyContext();
     const systemPrompt = buildSystemPrompt(companyContext);
     
-    const completion = await openai.chat.completions.create({
+    const completion = await openaiWithFallback({
       model: "gpt-4o-mini",
       messages: [
         { role: "system", content: systemPrompt + " You are a Facebook Ads audience strategist. Provide detailed audience suggestions with demographics, interests, behaviors, estimated reach, and best use cases. Format as JSON with suggestions array." },
@@ -3816,7 +4046,7 @@ app.post("/api/ai/creatives", async (req, res) => {
     
     const langInstruction = language === "th" ? "Thai" : language === "en" ? "English" : "both Thai and English";
     
-    const completion = await openai.chat.completions.create({
+    const completion = await openaiWithFallback({
       model: "gpt-4o-mini",
       messages: [
         { role: "system", content: systemPrompt + " You are a creative copywriter. Generate multiple ad copy variants with headlines and primary text. Format as JSON with variants array, each containing name, th (headline/text), and en (headline/text) fields." },
@@ -3910,7 +4140,7 @@ app.get("/api/ai/recommendations", async (req, res) => {
       userPrompt = `The user doesn't have any active campaigns yet. Based on ${companyContext.name}'s context (${companyContext.industry || 'their industry'}), provide 5 helpful "Getting Started" recommendations for creating their first Facebook/Instagram ad campaigns. Focus on best practices, setup tips, and initial strategy. ${conversationContext}`;
     }
     
-    const completion = await openai.chat.completions.create({
+    const completion = await openaiWithFallback({
       model: "gpt-4o-mini",
       messages: [
         { 
@@ -3993,7 +4223,7 @@ app.post("/api/ai/chat", async (req, res) => {
     // Add current message
     messages.push({ role: "user", content: message });
 
-    const completion = await openai.chat.completions.create({
+    const completion = await openaiWithFallback({
       model: "gpt-4o-mini",
       messages: messages,
       temperature: 0.8, // Higher temperature for more natural, conversational responses
