@@ -96,20 +96,107 @@ async function fetchProductsFromWebsite() {
   
   try {
     console.log(`[Products] Fetching from ${PRODUCTS_URL}`);
-    const response = await axios.get(PRODUCTS_URL, {
-      timeout: 10000,
-      headers: {
-        "User-Agent": "MAROM-Ads-Copilot/1.0"
+    let response;
+    try {
+      response = await axios.get(PRODUCTS_URL, {
+        timeout: 15000,
+        headers: {
+          "User-Agent": "Mozilla/5.0 (compatible; MAROM-Ads-Copilot/1.0)",
+          "Accept": "application/json"
+        },
+        validateStatus: function (status) {
+          return status >= 200 && status < 500; // Don't throw on 4xx, we'll handle it
+        }
+      });
+    } catch (axiosErr) {
+      // If axios still throws (shouldn't happen with validateStatus, but just in case)
+      if (axiosErr.response) {
+        response = axiosErr.response;
+      } else {
+        throw axiosErr;
       }
-    });
+    }
     
-    const products = Array.isArray(response.data) ? response.data : (response.data.products || []);
-    console.log(`[Products] Fetched ${products.length} products`);
+    // Check for HTTP errors
+    if (response.status >= 400) {
+      if (response.status === 404) {
+        throw new Error(`HTTP 404: The URL ${PRODUCTS_URL} was not found.\n\n` +
+          `Possible solutions:\n` +
+          `1. Check if the products.json endpoint exists\n` +
+          `2. Try alternative URLs:\n` +
+          `   - https://maromcosmetic.com/api/products.json\n` +
+          `   - https://maromcosmetic.com/products.json\n` +
+          `   - https://maromcosmetic.com/api/products\n` +
+          `3. Set PRODUCTS_URL environment variable to the correct endpoint\n` +
+          `4. If using Shopify, try: https://maromcosmetic.com/products.json (Shopify default)`);
+      } else {
+        throw new Error(`Website returned HTTP ${response.status}. Check if ${PRODUCTS_URL} is accessible.`);
+      }
+    }
+    
+    // Handle different response formats
+    let products = [];
+    if (Array.isArray(response.data)) {
+      products = response.data;
+    } else if (response.data && Array.isArray(response.data.products)) {
+      products = response.data.products;
+    } else if (response.data && typeof response.data === 'object') {
+      // Try to find products array in nested structure
+      const findProducts = (obj) => {
+        if (Array.isArray(obj)) return obj;
+        if (typeof obj !== 'object' || obj === null) return null;
+        if (obj.products && Array.isArray(obj.products)) return obj.products;
+        for (const key in obj) {
+          const found = findProducts(obj[key]);
+          if (found) return found;
+        }
+        return null;
+      };
+      products = findProducts(response.data) || [];
+    }
+    
+    if (products.length === 0) {
+      console.warn(`[Products] No products found in response. Response structure:`, JSON.stringify(response.data).substring(0, 200));
+    }
+    
+    console.log(`[Products] Fetched ${products.length} products from ${PRODUCTS_URL}`);
     
     return products;
   } catch (err) {
-    console.error("[Products] Error fetching from website:", err.message);
-    throw new Error(`Failed to fetch products: ${err.message}`);
+    let errorMsg = '';
+    
+    if (err.response) {
+      const status = err.response.status;
+      if (status === 404) {
+        errorMsg = `HTTP 404: The URL ${PRODUCTS_URL} was not found.\n\n` +
+          `Possible solutions:\n` +
+          `1. Check if the products.json endpoint exists\n` +
+          `2. Try alternative URLs:\n` +
+          `   - https://maromcosmetic.com/api/products.json\n` +
+          `   - https://maromcosmetic.com/products.json\n` +
+          `   - https://maromcosmetic.com/api/products\n` +
+          `3. Set PRODUCTS_URL environment variable to the correct endpoint\n` +
+          `4. If using Shopify, try: https://maromcosmetic.com/products.json (Shopify default)`;
+      } else {
+        errorMsg = `HTTP ${status}: ${err.response.statusText}. URL: ${PRODUCTS_URL}`;
+      }
+    } else if (err.code === 'ECONNREFUSED' || err.code === 'ENOTFOUND') {
+      errorMsg = `Cannot connect to ${PRODUCTS_URL}. Check if the URL is correct and the website is accessible.`;
+    } else if (err.code === 'ETIMEDOUT') {
+      errorMsg = `Request timed out. The website ${PRODUCTS_URL} took too long to respond.`;
+    } else {
+      errorMsg = err.message || 'Unknown error';
+    }
+    
+    console.error(`[Products] Error fetching from website:`, {
+      url: PRODUCTS_URL,
+      error: errorMsg,
+      code: err.code,
+      status: err.response?.status,
+      responseData: err.response?.data ? JSON.stringify(err.response.data).substring(0, 200) : null
+    });
+    
+    throw new Error(`Failed to fetch products from website: ${errorMsg}`);
   }
 }
 
@@ -167,38 +254,54 @@ function findProductByName(name) {
 
 // Build system prompt with company context
 function buildSystemPrompt(companyContext) {
-  let prompt = `You are an AI assistant helping with ${companyContext.name}'s Facebook and Instagram ad campaigns through the MAROM Ads Copilot dashboard. `;
+  let prompt = `You're a friendly, knowledgeable assistant helping ${companyContext.name || "MAROM"} manage their Facebook and Instagram ad campaigns. `;
   
   if (companyContext.industry) {
-    prompt += `The company operates in the ${companyContext.industry} industry. `;
+    prompt += `They're in the ${companyContext.industry} space. `;
   }
   
   if (companyContext.products && companyContext.products.length > 0) {
-    prompt += `Their main products/services include: ${companyContext.products.join(", ")}. `;
+    const productsList = Array.isArray(companyContext.products) 
+      ? companyContext.products.join(", ") 
+      : companyContext.products;
+    prompt += `Their main products include ${productsList}. `;
   }
   
   if (companyContext.targetAudience) {
-    prompt += `Their target audience: ${companyContext.targetAudience}. `;
+    prompt += `They're targeting ${companyContext.targetAudience}. `;
   }
   
   if (companyContext.brandValues) {
-    prompt += `Brand values: ${companyContext.brandValues}. `;
+    prompt += `Their brand stands for ${companyContext.brandValues}. `;
   }
   
   if (companyContext.campaignGoals) {
-    prompt += `Campaign goals: ${companyContext.campaignGoals}. `;
+    prompt += `Their campaign goals focus on ${companyContext.campaignGoals}. `;
   }
   
   if (companyContext.notes) {
     prompt += `Additional context: ${companyContext.notes}. `;
   }
   
-  prompt += `\n\nIMPORTANT CONTEXT:\n`;
-  prompt += `- You are helping users navigate the MAROM Ads Copilot dashboard, NOT Facebook/Instagram directly.\n`;
-  prompt += `- When users ask about "company profile" or "company settings", they mean the Company Profile tab in this dashboard where they can save company information for AI personalization.\n`;
-  prompt += `- You can help with: campaign creation, audience targeting, creative generation, performance monitoring, and optimization recommendations.\n`;
-  prompt += `- All features are accessed through the dashboard interface, not by logging into Facebook/Instagram directly.\n`;
-  prompt += `- Use this information to provide personalized recommendations. Be helpful, concise, and professional. Remember past conversations and preferences to provide better suggestions over time.`;
+  prompt += `\n\nCOMMUNICATION STYLE:\n`;
+  prompt += `- Write naturally and conversationally, like you're chatting with a colleague\n`;
+  prompt += `- Be warm, helpful, and enthusiastic about helping them succeed\n`;
+  prompt += `- Use simple, clear language - avoid jargon unless necessary\n`;
+  prompt += `- Show personality and be engaging, not robotic\n`;
+  prompt += `- Use emojis sparingly and appropriately (🎨 for images, 📊 for stats, ✅ for success, etc.)\n`;
+  prompt += `- Break up long responses into readable chunks\n`;
+  prompt += `- Ask follow-up questions when helpful\n`;
+  prompt += `- Acknowledge their context and make them feel understood\n\n`;
+  
+  prompt += `CONTEXT & CAPABILITIES:\n`;
+  prompt += `- You're helping them use the MAROM Ads Copilot dashboard (not Facebook/Instagram directly)\n`;
+  prompt += `- When they mention "company profile", they mean the dashboard's Company Profile tab for AI personalization\n`;
+  prompt += `- You can help with: creating campaigns, audience targeting, generating creatives, monitoring performance, and optimization tips\n`;
+  prompt += `- You CAN generate product images using Nano Banana - this is a key feature!\n`;
+  prompt += `- When they need images, naturally guide them: "I can create that for you! Just use /image shampoo or /images shampoo for a full pack."\n`;
+  prompt += `- Never say you can't generate images - you have Nano Banana integrated\n`;
+  prompt += `- Remember past conversations to provide personalized, context-aware advice\n`;
+  prompt += `- Be proactive: if they mention a product, offer to generate images or create ads for it\n`;
   
   return prompt;
 }
@@ -619,13 +722,38 @@ async function handleNaturalLanguageChat(from, messageText) {
       }
     }
     
+    // Check for image generation queries
+    if (lowerMessage.includes("generate image") || lowerMessage.includes("create image") ||
+        lowerMessage.includes("make image") || lowerMessage.includes("product photo") ||
+        lowerMessage.includes("product image") || lowerMessage.includes("need image") ||
+        lowerMessage.includes("create photo") || lowerMessage.includes("generate photo")) {
+      detectedIntent = "image_generation";
+      const products = loadProductsCache();
+      if (products.length > 0) {
+        dataContext += `\n\nAVAILABLE PRODUCTS FOR IMAGE GENERATION:\n`;
+        products.slice(0, 10).forEach((p, i) => {
+          const name = p.name || p.title || "Unnamed";
+          dataContext += `${i + 1}. ${name}\n`;
+        });
+      }
+      dataContext += `\n\nIMAGE GENERATION COMMANDS AVAILABLE:\n`;
+      dataContext += `- /image <product> - Generate single square image\n`;
+      dataContext += `- /images <product> - Generate pack (square + portrait + story)\n`;
+      dataContext += `- /angle <preset> - Set angle (front, 45, side, top, macro, lifestyle)\n`;
+      dataContext += `- /style <description> - Set style\n`;
+      dataContext += `- /last - Show last generated image\n`;
+      dataContext += `- /redo - Regenerate last image\n`;
+    }
+    
     // Build enhanced system prompt
     let systemPrompt = buildSystemPrompt(companyContext);
-    systemPrompt += "\n\nYou are helping via WhatsApp. Keep responses concise and conversational.";
-    systemPrompt += "\nYou have access to REAL campaign data, product data, and company profile.";
-    systemPrompt += "\nWhen users ask about stats, campaigns, or products, use the actual data provided below.";
-    systemPrompt += "\nIf data is not available, suggest using commands like /stats, /campaigns, or /products.";
-    systemPrompt += "\nFor campaign management actions, suggest using commands like /pause, /resume, /budget.";
+    systemPrompt += "\n\nYou're chatting via WhatsApp - keep it friendly and concise, like texting a colleague.";
+    systemPrompt += "\nYou have access to their REAL campaign data, product catalog, and company profile - use this to give specific, helpful answers.";
+    systemPrompt += "\nWhen they ask about performance or campaigns, reference the actual numbers and data below - it makes you more credible and helpful.";
+    systemPrompt += "\nFor image generation requests, respond enthusiastically: 'I'd love to help! Use /image [product] for a single image, or /images [product] for a full pack with all sizes.'";
+    systemPrompt += "\nIf you don't have data, guide them naturally: 'Let me check that for you - try /stats or /campaigns to see what's running.'";
+    systemPrompt += "\nFor campaign actions, suggest commands naturally: 'Want to pause that campaign? Just use /pause [campaign name].'";
+    systemPrompt += "\nBe proactive and helpful - if they mention a product, offer to generate images or create ads for it.";
     
     if (detectedIntent) {
       systemPrompt += `\n\nUser intent detected: ${detectedIntent}`;
@@ -651,8 +779,10 @@ async function handleNaturalLanguageChat(from, messageText) {
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: messages,
-      temperature: 0.7,
-      max_tokens: 600
+      temperature: 0.8, // Higher temperature for more natural, varied responses
+      max_tokens: 600,
+      presence_penalty: 0.3, // Encourage more varied vocabulary
+      frequency_penalty: 0.2 // Reduce repetition
     });
 
     const aiResponse = completion.choices[0].message.content;
@@ -789,8 +919,11 @@ async function executeCommand(from, command, params, confirmed = false) {
         if (params[0] === "api") {
           result.success = true;
           await handleTestApi(from);
+        } else if (params[0] === "products" || params[0] === "website") {
+          result.success = true;
+          await handleTestProducts(from);
         } else {
-          await sendWhatsAppMessage(from, "⚠️ Usage: /test api");
+          await sendWhatsAppMessage(from, "⚠️ Usage: /test api | /test products");
           result.error = "Invalid test target";
         }
         break;
@@ -903,6 +1036,53 @@ async function handleTestApi(from) {
         `You may need 'ads_read' permission.\n` +
         `Check: https://developers.facebook.com/apps/`
       );
+    }
+  } catch (err) {
+    await sendWhatsAppMessage(from, `❌ Test failed: ${err.message}`);
+  }
+}
+
+async function handleTestProducts(from) {
+  try {
+    const PRODUCTS_URL = process.env.PRODUCTS_URL || "https://maromcosmetic.com/products.json";
+    const cached = loadProductsCache();
+    const cacheAge = getProductsCacheAge();
+    const cacheAgeHours = cacheAge / (1000 * 60 * 60);
+    
+    await sendWhatsAppMessage(from, `🔍 Testing product website access...\n\nURL: ${PRODUCTS_URL}`);
+    
+    try {
+      const products = await fetchProductsFromWebsite();
+      
+      let msg = "✅ Website Access Successful!\n\n";
+      msg += `• URL: ${PRODUCTS_URL}\n`;
+      msg += `• Products Found: ${products.length}\n`;
+      msg += `• Cache: ${cached.length} products (${cacheAgeHours.toFixed(1)}h old)\n\n`;
+      
+      if (products.length > 0) {
+        msg += `Sample products:\n`;
+        products.slice(0, 3).forEach((p, i) => {
+          const name = p.name || p.title || "Unnamed";
+          msg += `${i + 1}. ${name}\n`;
+        });
+      } else {
+        msg += `⚠️ Website returned empty data. Check response format.`;
+      }
+      
+      await sendWhatsAppMessage(from, msg);
+    } catch (fetchErr) {
+      let msg = "❌ Website Access Failed\n\n";
+      msg += `• URL: ${PRODUCTS_URL}\n`;
+      msg += `• Error: ${fetchErr.message}\n\n`;
+      msg += `Current Cache: ${cached.length} products\n`;
+      msg += `Cache Age: ${cacheAgeHours.toFixed(1)} hours\n\n`;
+      msg += `Troubleshooting:\n`;
+      msg += `1. Verify URL in browser\n`;
+      msg += `2. Check PRODUCTS_URL env var\n`;
+      msg += `3. Website may block bots\n`;
+      msg += `4. Check network/firewall`;
+      
+      await sendWhatsAppMessage(from, msg);
     }
   } catch (err) {
     await sendWhatsAppMessage(from, `❌ Test failed: ${err.message}`);
@@ -1491,11 +1671,50 @@ async function handleSyncProducts(from) {
   try {
     await sendWhatsAppMessage(from, "🔄 Syncing products from website...");
     
-    const products = await fetchProductsFromWebsite();
-    saveProductsCache(products);
+    const PRODUCTS_URL = process.env.PRODUCTS_URL || "https://maromcosmetic.com/products.json";
     
-    await sendWhatsAppMessage(from, `✅ Synced ${products.length} products successfully!`);
-    console.log(`[WhatsApp] /sync products executed by ${from}`);
+    try {
+      const products = await fetchProductsFromWebsite();
+      
+      if (products.length === 0) {
+        await sendWhatsAppMessage(from, 
+          `⚠️ No products found at ${PRODUCTS_URL}\n\n` +
+          `The website may be:\n` +
+          `• Returning empty data\n` +
+          `• Using a different format\n` +
+          `• Blocking requests\n\n` +
+          `Check PRODUCTS_URL in your environment variables.`
+        );
+        return;
+      }
+      
+      saveProductsCache(products);
+      await sendWhatsAppMessage(from, `✅ Synced ${products.length} products successfully!`);
+      console.log(`[WhatsApp] /sync products executed by ${from}`);
+    } catch (fetchErr) {
+      // Provide detailed error message with 404-specific help
+      let errorMsg = `❌ Failed to sync products:\n\n${fetchErr.message}\n\n`;
+      
+      if (fetchErr.message.includes('404')) {
+        errorMsg += `🔍 404 Error - URL not found!\n\n` +
+          `Try these alternatives:\n` +
+          `• https://maromcosmetic.com/api/products.json\n` +
+          `• https://maromcosmetic.com/products.json\n` +
+          `• https://maromcosmetic.com/api/products\n\n` +
+          `Or set PRODUCTS_URL env var to the correct endpoint.\n\n`;
+      } else {
+        errorMsg += `Troubleshooting:\n` +
+          `1. Check PRODUCTS_URL: ${PRODUCTS_URL}\n` +
+          `2. Verify the URL is accessible\n` +
+          `3. Check if website blocks bots\n` +
+          `4. Try accessing ${PRODUCTS_URL} in a browser\n\n`;
+      }
+      
+      errorMsg += `Current cache: ${loadProductsCache().length} products`;
+      
+      await sendWhatsAppMessage(from, errorMsg);
+      throw fetchErr;
+    }
   } catch (err) {
     throw new Error("Failed to sync products: " + err.message);
   }
@@ -1537,7 +1756,8 @@ function getHelpMessage() {
     `/report daily [HH:mm] - Schedule reports\n` +
     `/alerts on|off - Toggle alerts\n\n` +
     `*🔧 DIAGNOSTICS*\n` +
-    `/test api - Check API connection\n\n` +
+    `/test api - Check API connection\n` +
+    `/test products - Test website access\n\n` +
     `Type /help anytime for this list.`
   );
 }
@@ -2199,7 +2419,7 @@ app.post("/api/ai/chat", async (req, res) => {
     const messages = [
       {
         role: "system",
-        content: systemPrompt + " Remember past conversations and use company context to provide personalized, relevant advice. When users mention 'company profile', they're referring to the Company Profile tab in this dashboard where they can save company information for AI personalization - NOT Facebook or Instagram profile settings."
+        content: systemPrompt + " Remember past conversations to provide personalized advice that builds on what you've discussed before. When they mention 'company profile', they mean the dashboard's Company Profile tab (not Facebook/Instagram settings). Most importantly: You CAN and SHOULD generate images using Nano Banana! When they ask about images, respond enthusiastically and guide them: 'Absolutely! I can create product images for you. Try /image [product] for a single image, or /images [product] for a complete pack with square, portrait, and story formats.' Be natural, helpful, and conversational - like you're genuinely excited to help them succeed."
       }
     ];
     
@@ -2224,8 +2444,10 @@ app.post("/api/ai/chat", async (req, res) => {
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: messages,
-      temperature: 0.7,
-      max_tokens: 800
+      temperature: 0.8, // Higher temperature for more natural, conversational responses
+      max_tokens: 800,
+      presence_penalty: 0.3, // Encourage varied vocabulary
+      frequency_penalty: 0.2 // Reduce repetition for more natural flow
     });
 
     const aiResponse = completion.choices[0].message.content;
