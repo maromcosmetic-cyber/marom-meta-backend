@@ -14,11 +14,32 @@ const VERTEX_API_BASE = `https://${LOCATION}-aiplatform.googleapis.com/v1`;
  * Generate image using Imagen 3
  * @param {string} prompt - Text prompt for image generation
  * @param {string} aspectRatio - Aspect ratio (1:1, 16:9, 9:16)
+ * @param {object} productContext - Optional product context {title, shortDesc, ingredients}
  * @returns {Promise<{buffer: Buffer, mimeType: string, model: string}>}
  */
-export async function generateImage(prompt, aspectRatio = "1:1") {
+export async function generateImage(prompt, aspectRatio = "1:1", productContext = null) {
   try {
-    console.log(`[Vertex] Generating image with Imagen 3: "${prompt.substring(0, 50)}..."`);
+    // Enrich prompt with product context if provided
+    let enrichedPrompt = prompt;
+    if (productContext) {
+      const contextParts = [];
+      if (productContext.title) {
+        contextParts.push(`Product: ${productContext.title}`);
+      }
+      if (productContext.shortDesc) {
+        const desc = productContext.shortDesc.substring(0, 140);
+        contextParts.push(`Key points: ${desc}`);
+      }
+      if (productContext.ingredients) {
+        contextParts.push(`Ingredients: ${productContext.ingredients.substring(0, 100)}`);
+      }
+      contextParts.push("Brand: Marom");
+      
+      const contextLine = contextParts.join(". ");
+      enrichedPrompt = `${contextLine}. ${prompt}`;
+    }
+    
+    console.log(`[Vertex] Generating image with Imagen 3: "${enrichedPrompt.substring(0, 50)}..."`);
     
     // Map aspect ratio to Imagen format
     const aspectRatioMap = {
@@ -33,7 +54,7 @@ export async function generateImage(prompt, aspectRatio = "1:1") {
     
     const requestBody = {
       instances: [{
-        prompt: prompt
+        prompt: enrichedPrompt
       }],
       parameters: {
         sampleCount: 1,
@@ -154,31 +175,54 @@ export async function editImage(prompt, productImageUrl, maskPngUrl = null) {
  * @param {string} prompt - Text prompt for video generation
  * @param {string} aspectRatio - Aspect ratio (16:9, 9:16)
  * @param {number} durationSec - Duration in seconds
+ * @param {object} productContext - Optional product context {title, shortDesc, ingredients}
  * @returns {Promise<{buffer: Buffer, mimeType: string, model: string}>}
  */
-export async function generateVideo(prompt, aspectRatio = "16:9", durationSec = 5) {
+export async function generateVideo(prompt, aspectRatio = "16:9", durationSec = 5, productContext = null) {
   try {
-    console.log(`[Vertex] Generating video with Veo 3: "${prompt.substring(0, 50)}..." (${durationSec}s)`);
+    // Enrich prompt with product context for UGC-style videos
+    let enrichedPrompt = prompt;
+    if (productContext) {
+      const contextParts = [];
+      if (productContext.title) {
+        contextParts.push(`Featuring: ${productContext.title}`);
+      }
+      if (productContext.shortDesc) {
+        const desc = productContext.shortDesc.substring(0, 100);
+        contextParts.push(`Product highlights: ${desc}`);
+      }
+      contextParts.push("Brand: Marom");
+      contextParts.push("UGC style, authentic user-generated content feel");
+      
+      const contextLine = contextParts.join(". ");
+      enrichedPrompt = `${contextLine}. ${prompt}`;
+    }
+    
+    console.log(`[Vertex] Generating video with Veo 3: "${enrichedPrompt.substring(0, 50)}..." (${durationSec}s)`);
     
     // Use Veo 3 Fast for shorter videos, Veo 3 for longer
     const modelName = durationSec <= 5 ? "veo-3-fast" : "veo-3";
     
+    // Vertex AI Veo API endpoint (correct structure)
     const endpoint = `${VERTEX_API_BASE}/projects/${PROJECT_ID}/locations/${LOCATION}/publishers/google/models/${modelName}:predict`;
+    
+    // Default duration to 8 seconds if not specified
+    const finalDuration = durationSec || 8;
     
     const requestBody = {
       instances: [{
-        prompt: prompt
+        prompt: enrichedPrompt
       }],
       parameters: {
         aspectRatio: aspectRatio,
-        durationSeconds: Math.min(Math.max(durationSec, 5), 60), // Clamp between 5-60 seconds
+        durationSeconds: Math.min(Math.max(finalDuration, 5), 60), // Clamp between 5-60 seconds
         safetyFilterLevel: "block_some"
       }
     };
     
     const accessToken = await getAccessToken();
     
-    // Start video generation job
+    // Start video generation job (Veo uses async job pattern)
     const response = await axios.post(endpoint, requestBody, {
       headers: {
         "Authorization": `Bearer ${accessToken}`,
@@ -187,25 +231,64 @@ export async function generateVideo(prompt, aspectRatio = "16:9", durationSec = 
       timeout: 30000
     });
     
-    if (!response.data?.name) {
-      throw new Error("Video generation job not started");
+    // Check response structure - Veo may return job name or direct response
+    let jobName = null;
+    
+    if (response.data?.name) {
+      // Async job pattern
+      jobName = response.data.name;
+      console.log(`[Vertex] Video generation job started: ${jobName}`);
+      
+      // Poll for completion
+      const videoBuffer = await pollVideoJob(jobName, accessToken);
+      
+      console.log(`[Vertex] Video generated successfully (${videoBuffer.length} bytes)`);
+      
+      return {
+        buffer: videoBuffer,
+        mimeType: "video/mp4",
+        model: modelName
+      };
+    } else if (response.data?.predictions && response.data.predictions[0]?.bytesBase64Encoded) {
+      // Direct response (synchronous)
+      const videoBase64 = response.data.predictions[0].bytesBase64Encoded;
+      const videoBuffer = Buffer.from(videoBase64, "base64");
+      
+      console.log(`[Vertex] Video generated successfully (${videoBuffer.length} bytes)`);
+      
+      return {
+        buffer: videoBuffer,
+        mimeType: "video/mp4",
+        model: modelName
+      };
+    } else if (response.data?.response?.videoUri) {
+      // Video URI in response
+      const videoUrl = response.data.response.videoUri;
+      const videoResponse = await axios.get(videoUrl, { responseType: "arraybuffer" });
+      const videoBuffer = Buffer.from(videoResponse.data);
+      
+      console.log(`[Vertex] Video generated successfully (${videoBuffer.length} bytes)`);
+      
+      return {
+        buffer: videoBuffer,
+        mimeType: "video/mp4",
+        model: modelName
+      };
+    } else {
+      // Try alternative endpoint structure for Veo
+      console.log("[Vertex] Trying alternative Veo endpoint structure...");
+      throw new Error("Video generation job not started - unexpected response format");
     }
-    
-    const jobName = response.data.name;
-    console.log(`[Vertex] Video generation job started: ${jobName}`);
-    
-    // Poll for completion
-    const videoBuffer = await pollVideoJob(jobName, accessToken);
-    
-    console.log(`[Vertex] Video generated successfully (${videoBuffer.length} bytes)`);
-    
-    return {
-      buffer: videoBuffer,
-      mimeType: "video/mp4",
-      model: modelName
-    };
   } catch (err) {
     console.error("[Vertex] Video generation error:", err.response?.data || err.message);
+    
+    // Provide more helpful error message
+    if (err.response?.status === 404) {
+      throw new Error("Veo model not available. Check Vertex AI model availability.");
+    } else if (err.response?.status === 403) {
+      throw new Error("Permission denied. Check Vertex AI API permissions.");
+    }
+    
     throw new Error(`Video generation failed: ${err.message}`);
   }
 }
@@ -269,13 +352,35 @@ async function pollVideoJob(jobName, accessToken, maxAttempts = 60, intervalMs =
 async function getAccessToken() {
   try {
     // For Vertex AI, we need to use Application Default Credentials
-    // In Render, this is typically set via GOOGLE_APPLICATION_CREDENTIALS
+    // Supports both file path (GOOGLE_APPLICATION_CREDENTIALS) and env vars (GOOGLE_PRIVATE_KEY + GOOGLE_CLIENT_EMAIL)
     const { GoogleAuth } = await import("google-auth-library");
-    const auth = new GoogleAuth({
-      scopes: ["https://www.googleapis.com/auth/cloud-platform"],
-      keyFilename: process.env.GOOGLE_APPLICATION_CREDENTIALS
-    });
     
+    const authConfig = {
+      scopes: ["https://www.googleapis.com/auth/cloud-platform"]
+    };
+    
+    // If GOOGLE_APPLICATION_CREDENTIALS is set (file path), use it
+    if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+      authConfig.keyFilename = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+    } 
+    // If using individual env vars, create credentials object
+    else if (process.env.GOOGLE_PRIVATE_KEY && process.env.GOOGLE_CLIENT_EMAIL) {
+      authConfig.credentials = {
+        type: "service_account",
+        project_id: process.env.GOOGLE_CLOUD_PROJECT || PROJECT_ID,
+        private_key_id: process.env.GOOGLE_PRIVATE_KEY_ID || "",
+        private_key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n"),
+        client_email: process.env.GOOGLE_CLIENT_EMAIL,
+        client_id: process.env.GOOGLE_CLIENT_ID || "",
+        auth_uri: "https://accounts.google.com/o/oauth2/auth",
+        token_uri: "https://oauth2.googleapis.com/token",
+        auth_provider_x509_cert_url: "https://www.googleapis.com/oauth2/v1/certs",
+        client_x509_cert_url: `https://www.googleapis.com/robot/v1/metadata/x509/${encodeURIComponent(process.env.GOOGLE_CLIENT_EMAIL)}`
+      };
+    }
+    // Otherwise, GoogleAuth will try to use default credentials
+    
+    const auth = new GoogleAuth(authConfig);
     const client = await auth.getClient();
     const accessToken = await client.getAccessToken();
     
