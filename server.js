@@ -4577,6 +4577,141 @@ app.post("/api/ai/creatives", async (req, res) => {
   }
 });
 
+// AI Audience Suggestions endpoint
+app.post("/api/ai/audience-suggestions", requireAdminKey, async (req, res) => {
+  try {
+    const companyContext = loadCompanyContext();
+    
+    // Build comprehensive company profile context
+    let contextPrompt = `Company: ${companyContext.name || "MAROM"}\n`;
+    
+    if (companyContext.industry) {
+      contextPrompt += `Industry: ${companyContext.industry}\n`;
+    }
+    
+    if (companyContext.description) {
+      contextPrompt += `Description: ${companyContext.description}\n`;
+    }
+    
+    if (companyContext.mission) {
+      contextPrompt += `Mission: ${companyContext.mission}\n`;
+    }
+    
+    if (companyContext.targetAudience) {
+      contextPrompt += `Current Target Audience: ${companyContext.targetAudience}\n`;
+    }
+    
+    if (companyContext.brandValues) {
+      contextPrompt += `Brand Values: ${companyContext.brandValues}\n`;
+    }
+    
+    if (companyContext.brandUSP) {
+      contextPrompt += `Unique Selling Points: ${companyContext.brandUSP}\n`;
+    }
+    
+    if (companyContext.brandPersonality) {
+      contextPrompt += `Brand Personality: ${companyContext.brandPersonality}\n`;
+    }
+    
+    if (companyContext.brandTone) {
+      contextPrompt += `Brand Tone: ${companyContext.brandTone}\n`;
+    }
+    
+    // Get product categories for context
+    try {
+      const products = await getProductsCache();
+      if (products && products.length > 0) {
+        const categories = new Set();
+        products.forEach(p => {
+          if (p.categories && Array.isArray(p.categories)) {
+            p.categories.forEach(cat => categories.add(cat.name || cat));
+          }
+        });
+        if (categories.size > 0) {
+          contextPrompt += `Product Categories: ${Array.from(categories).join(", ")}\n`;
+        }
+      }
+    } catch (err) {
+      console.warn("[AI Audience] Could not load products:", err.message);
+    }
+    
+    const systemPrompt = `You are a Facebook and Instagram advertising expert specializing in audience targeting. Based on a company's profile, suggest optimal audience targeting parameters for their ad campaigns.
+
+You should suggest:
+1. Age range (min and max, typically 18-65)
+2. Gender targeting (1=Men, 2=Women, or leave empty for all)
+3. Top 3-5 countries (use ISO country codes like TH, US, GB, etc.)
+4. 5-10 relevant interests/keywords (comma-separated)
+5. 2-3 relevant behaviors (optional, comma-separated)
+
+Consider:
+- The company's industry and products
+- Their target audience description
+- Brand values and personality
+- Geographic markets they likely serve
+- Interests that align with their products/services
+
+Return your response as JSON with this exact structure:
+{
+  "name": "Suggested audience name (e.g., 'Women 25-45, Beauty Enthusiasts')",
+  "ageMin": 25,
+  "ageMax": 45,
+  "gender": "2",
+  "locations": ["TH", "US"],
+  "interests": ["Beauty", "Skincare", "Natural products", "Cosmetics", "Wellness"],
+  "behaviors": ["Online shoppers", "Mobile device users"],
+  "reasoning": "Brief explanation of why this audience is a good fit"
+}`;
+
+    const userPrompt = `Based on this company profile, suggest an optimal Facebook/Instagram ad audience:
+
+${contextPrompt}
+
+Provide a well-targeted audience suggestion that would perform well for their campaigns.`;
+
+    const completion = await openaiWithFallback({
+      model: "gpt-4o-mini",
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt }
+      ],
+      response_format: { type: "json_object" },
+      temperature: 0.7,
+      max_tokens: 500
+    });
+    
+    const suggestion = JSON.parse(completion.choices[0].message.content);
+    
+    // Validate and normalize the response
+    const normalized = {
+      name: suggestion.name || "AI Suggested Audience",
+      ageMin: suggestion.ageMin || null,
+      ageMax: suggestion.ageMax || null,
+      gender: suggestion.gender || "",
+      locations: Array.isArray(suggestion.locations) ? suggestion.locations : 
+                 (suggestion.locations ? suggestion.locations.split(",").map(l => l.trim()) : []),
+      interests: Array.isArray(suggestion.interests) ? suggestion.interests.join(", ") :
+                 (suggestion.interests || ""),
+      behaviors: Array.isArray(suggestion.behaviors) ? suggestion.behaviors.join(", ") :
+                (suggestion.behaviors || ""),
+      reasoning: suggestion.reasoning || "AI-generated suggestion based on company profile"
+    };
+    
+    console.log(`[AI Audience] Generated suggestion for ${companyContext.name || "company"}`);
+    
+    res.json({
+      success: true,
+      suggestion: normalized
+    });
+  } catch (err) {
+    console.error("[AI Audience] Error:", err);
+    res.status(500).json({
+      success: false,
+      error: err.message || "Failed to generate audience suggestions"
+    });
+  }
+});
+
 // Campaign improvement suggestions
 app.get("/api/ai/recommendations", async (req, res) => {
   try {
