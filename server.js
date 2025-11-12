@@ -3153,7 +3153,15 @@ async function sendWhatsAppImage(to, mediaId, caption = "") {
 async function checkImageConfig() {
   // Check if Vertex AI module actually exists before preferring it
   let vertexAvailable = false;
-  if (process.env.GOOGLE_CLOUD_PROJECT && process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+  
+  // Check for Vertex AI credentials (supports both file path and individual env vars)
+  const hasVertexCredentials = (
+    process.env.GOOGLE_CLOUD_PROJECT && 
+    (process.env.GOOGLE_APPLICATION_CREDENTIALS || 
+     (process.env.GOOGLE_PRIVATE_KEY && process.env.GOOGLE_CLIENT_EMAIL))
+  );
+  
+  if (hasVertexCredentials) {
     try {
       // Check if file exists first - try multiple possible locations
       const possiblePaths = [
@@ -3201,7 +3209,7 @@ async function checkImageConfig() {
     return "nanobanana";
   }
   
-  throw new Error("Image engine not configured. Set GOOGLE_CLOUD_PROJECT and GOOGLE_APPLICATION_CREDENTIALS for Vertex AI, or NB_BASE_URL for Nano Banana.");
+  throw new Error("Image engine not configured. For Vertex AI: Set GOOGLE_CLOUD_PROJECT and either GOOGLE_APPLICATION_CREDENTIALS (file path) or GOOGLE_PRIVATE_KEY + GOOGLE_CLIENT_EMAIL (env vars). For Nano Banana: Set NB_BASE_URL.");
 }
 
 // Generate image (uses Vertex AI Imagen 3 or Nano Banana fallback)
