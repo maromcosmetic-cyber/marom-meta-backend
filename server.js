@@ -6,6 +6,8 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import OpenAI from "openai";
+import sharp from "sharp";
+import FormData from "form-data";
 dotenv.config();
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -220,8 +222,94 @@ const WHATSAPP_PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID;
 const WHATSAPP_ACCESS_TOKEN = process.env.WHATSAPP_ACCESS_TOKEN || TOKEN; // Can use same token if it has WhatsApp permissions
 const ADMIN_NUMBERS = (process.env.ADMIN_NUMBERS || "").split(",").map(s => s.trim()).filter(Boolean);
 
+// Nano Banana configuration
+const NANOBANANA_URL = process.env.NANOBANANA_URL || "http://127.0.0.1:7860";
+const ADMIN_DASH_KEY = process.env.ADMIN_DASH_KEY;
+
+// Admin key middleware
+function requireAdminKey(req, res, next) {
+  const providedKey = req.headers["x-admin-key"];
+  if (!ADMIN_DASH_KEY || providedKey !== ADMIN_DASH_KEY) {
+    return res.status(401).json({ ok: false, error: "Unauthorized. Missing or invalid x-admin-key header." });
+  }
+  next();
+}
+
 // Pending confirmations for risky commands
 const pendingConfirmations = new Map(); // phone -> { command, params, timestamp }
+
+// Image generation session state (per WhatsApp user)
+const imageSessions = new Map(); // phone -> { angle, style, bg, aspect }
+
+// Recent creative history (ring buffer, last 20 per user)
+const creativeHistory = new Map(); // phone -> Array<{ mediaId, caption, product, angle, style, timestamp }>
+
+// Angle presets
+const ANGLE_PRESETS = {
+  "front": "front-on product hero, eye-level camera",
+  "45": "three-quarter 45-degree product angle",
+  "side": "side profile product angle",
+  "top": "top view, flat lay composition",
+  "flatlay": "top view, flat lay composition",
+  "macro": "macro close-up, shallow depth of field",
+  "lifestyle": "lifestyle context, natural surface, soft daylight"
+};
+
+// Get or initialize session
+function getSession(from) {
+  if (!imageSessions.has(from)) {
+    imageSessions.set(from, {
+      angle: "front",
+      style: "clean studio, premium cosmetics look",
+      bg: "plain",
+      aspect: "1:1"
+    });
+  }
+  return imageSessions.get(from);
+}
+
+// Convert image buffer to base64 data URL
+function imageToDataURL(imageBuffer) {
+  return `data:image/jpeg;base64,${imageBuffer.toString("base64")}`;
+}
+
+// Match angle from user text
+function matchAngle(text) {
+  const lower = text.toLowerCase();
+  if (lower.includes("45") || lower.includes("three-quarter")) return "45";
+  if (lower.includes("side") || lower.includes("profile")) return "side";
+  if (lower.includes("top") || lower.includes("flatlay") || lower.includes("flat lay")) return "top";
+  if (lower.includes("macro") || lower.includes("close-up")) return "macro";
+  if (lower.includes("lifestyle") || lower.includes("context")) return "lifestyle";
+  if (lower.includes("front") || lower.includes("hero")) return "front";
+  return null;
+}
+
+// Add to creative history
+function addToHistory(from, mediaId, caption, product, angle, style) {
+  if (!creativeHistory.has(from)) {
+    creativeHistory.set(from, []);
+  }
+  const history = creativeHistory.get(from);
+  history.push({
+    mediaId,
+    caption,
+    product,
+    angle,
+    style,
+    timestamp: Date.now()
+  });
+  // Keep last 20
+  if (history.length > 20) {
+    history.shift();
+  }
+}
+
+// Get last creative
+function getLastCreative(from) {
+  const history = creativeHistory.get(from);
+  return history && history.length > 0 ? history[history.length - 1] : null;
+}
 
 // Helper
 const fb = async (path, method="GET", paramsOrBody={}) => {
@@ -704,6 +792,46 @@ async function executeCommand(from, command, params, confirmed = false) {
         } else {
           await sendWhatsAppMessage(from, "⚠️ Usage: /test api");
           result.error = "Invalid test target";
+        }
+        break;
+        
+      case "/angle":
+        result.success = true;
+        await handleAngle(from, params.join(" "));
+        break;
+        
+      case "/style":
+        result.success = true;
+        await handleStyle(from, params.join(" "));
+        break;
+        
+      case "/image":
+        result.success = true;
+        await handleImage(from, params);
+        break;
+        
+      case "/images":
+        if (!isAdmin(from) && ADMIN_NUMBERS.length > 0) {
+          await sendWhatsAppMessage(from, "⚠️ This command requires admin access.");
+          result.error = "Unauthorized";
+        } else {
+          result.success = true;
+          await handleImages(from, params);
+        }
+        break;
+        
+      case "/last":
+        result.success = true;
+        await handleLast(from);
+        break;
+        
+      case "/redo":
+        if (!isAdmin(from) && ADMIN_NUMBERS.length > 0) {
+          await sendWhatsAppMessage(from, "⚠️ This command requires admin access.");
+          result.error = "Unauthorized";
+        } else {
+          result.success = true;
+          await handleRedo(from);
         }
         break;
         
@@ -1389,6 +1517,13 @@ function getHelpMessage() {
     `/copy <product> - Generate ad copy\n` +
     `/audience <product> - Get targeting\n` +
     `/createad <product> <budget> - Draft ad\n\n` +
+    `*🎨 IMAGE GENERATION*\n` +
+    `/angle <preset> - Set angle (front/45/side/top/macro/lifestyle)\n` +
+    `/style <text> - Set style\n` +
+    `/image <product> [| style] - Generate square image\n` +
+    `/images <product> - Generate pack (square/portrait/story)\n` +
+    `/last - Show last generated image\n` +
+    `/redo - Regenerate last image\n\n` +
     `*📦 PRODUCTS*\n` +
     `/products - List all products\n` +
     `/product <name> - Get product details\n` +
@@ -1440,6 +1575,328 @@ async function sendWhatsAppMessage(to, text) {
   } catch (err) {
     console.error("Error sending WhatsApp message:", err.response?.data || err.message);
     throw err;
+  }
+}
+
+// Upload media to WhatsApp
+async function uploadWhatsAppMedia(imageBuffer, mimeType = "image/jpeg") {
+  if (!WHATSAPP_PHONE_NUMBER_ID || !WHATSAPP_ACCESS_TOKEN) {
+    throw new Error("WhatsApp credentials not configured");
+  }
+  
+  const form = new FormData();
+  form.append("file", imageBuffer, {
+    filename: "image.jpg",
+    contentType: mimeType
+  });
+  form.append("messaging_product", "whatsapp");
+  form.append("type", "image");
+  
+  try {
+    const response = await axios.post(
+      `${GRAPH}/${WHATSAPP_PHONE_NUMBER_ID}/media`,
+      form,
+      {
+        headers: {
+          ...form.getHeaders(),
+          Authorization: `Bearer ${WHATSAPP_ACCESS_TOKEN}`
+        },
+        maxContentLength: Infinity,
+        maxBodyLength: Infinity
+      }
+    );
+    
+    return response.data.id; // media_id
+  } catch (err) {
+    console.error("Error uploading media:", err.response?.data || err.message);
+    throw new Error(`Failed to upload media: ${err.message}`);
+  }
+}
+
+// Send WhatsApp image message
+async function sendWhatsAppImage(to, mediaId, caption = "") {
+  if (!WHATSAPP_PHONE_NUMBER_ID || !WHATSAPP_ACCESS_TOKEN) {
+    throw new Error("WhatsApp credentials not configured");
+  }
+  
+  try {
+    const response = await axios.post(
+      `${GRAPH}/${WHATSAPP_PHONE_NUMBER_ID}/messages`,
+      {
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
+        to: to,
+        type: "image",
+        image: {
+          id: mediaId,
+          caption: caption.substring(0, 1024) // WhatsApp caption limit
+        }
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${WHATSAPP_ACCESS_TOKEN}`,
+          "Content-Type": "application/json"
+        }
+      }
+    );
+    
+    console.log(`WhatsApp image sent to ${to}, media_id: ${mediaId}`);
+    return response.data;
+  } catch (err) {
+    console.error("Error sending WhatsApp image:", err.response?.data || err.message);
+    throw err;
+  }
+}
+
+// Generate image with Nano Banana
+async function generateImageWithNanoBanana(prompt, width = 1024, height = 1024) {
+  try {
+    console.log(`[Nano Banana] Generating ${width}x${height}: ${prompt.substring(0, 100)}...`);
+    
+    const response = await axios.post(
+      `${NANOBANANA_URL}/generate`,
+      {
+        prompt: prompt,
+        width: width,
+        height: height,
+        steps: 28,
+        guidance_scale: 4.5,
+        negative_prompt: "text, price, watermark, logo, blurry, low quality"
+      },
+      {
+        responseType: "arraybuffer",
+        timeout: 60000
+      }
+    );
+    
+    // Convert to JPEG with sharp
+    const jpegBuffer = await sharp(Buffer.from(response.data))
+      .jpeg({ quality: 87 })
+      .toBuffer();
+    
+    // Check size (WhatsApp limit ~5MB, we'll keep under 4.5MB)
+    if (jpegBuffer.length > 4.5 * 1024 * 1024) {
+      // Resize if too large
+      const resized = await sharp(jpegBuffer)
+        .resize(1024, 1024, { fit: "inside", withoutEnlargement: true })
+        .jpeg({ quality: 85 })
+        .toBuffer();
+      return resized;
+    }
+    
+    return jpegBuffer;
+  } catch (err) {
+    console.error("[Nano Banana] Error:", err.message);
+    throw new Error(`Image generation failed: ${err.message}`);
+  }
+}
+
+// Build image prompt
+function buildImagePrompt(product, session, companyContext, styleOverride = null) {
+  const style = styleOverride || session.style;
+  const angleDesc = ANGLE_PRESETS[session.angle] || ANGLE_PRESETS["front"];
+  
+  let prompt = `${companyContext.name || "MAROM"} ${product.name || product.title || "product"}, `;
+  prompt += `${angleDesc}, `;
+  prompt += `${style}, `;
+  
+  if (product.description) {
+    prompt += `${product.description.substring(0, 200)}, `;
+  }
+  
+  prompt += `professional product photography, high quality, sharp focus, `;
+  prompt += `no text, no price tags, no watermarks, clean background`;
+  
+  return prompt;
+}
+
+// Command handlers for image generation
+async function handleAngle(from, text) {
+  const session = getSession(from);
+  const matchedAngle = matchAngle(text);
+  
+  if (matchedAngle) {
+    session.angle = matchedAngle;
+    await sendWhatsAppMessage(from, `📐 Angle set to: ${matchedAngle}`);
+  } else {
+    await sendWhatsAppMessage(from, 
+      `⚠️ Unknown angle. Available: front, 45, side, top, macro, lifestyle\n\n` +
+      `Or say: "make it flatlay", "angle 45", "side view", etc.`
+    );
+  }
+}
+
+async function handleStyle(from, text) {
+  if (!text) {
+    await sendWhatsAppMessage(from, "⚠️ Usage: /style <description>\n\nExample: /style warm wood table, soft daylight");
+    return;
+  }
+  
+  const session = getSession(from);
+  session.style = text;
+  await sendWhatsAppMessage(from, `🎨 Style set to: ${text}`);
+}
+
+async function handleImage(from, params) {
+  try {
+    if (params.length === 0) {
+      await sendWhatsAppMessage(from, "⚠️ Usage: /image <product> [| style]\n\nExample: /image shampoo | warm lighting");
+      return;
+    }
+    
+    const input = params.join(" ");
+    const parts = input.split("|");
+    const productQuery = parts[0].trim();
+    const styleOverride = parts[1] ? parts[1].trim() : null;
+    
+    // Find product
+    const product = findProductByName(productQuery);
+    if (!product) {
+      await sendWhatsAppMessage(from, 
+        `⚠️ Product not found: ${productQuery}\n\n` +
+        `Use /products to see all products.`
+      );
+      return;
+    }
+    
+    await sendWhatsAppMessage(from, "🎨 Generating image...");
+    
+    const session = getSession(from);
+    const companyContext = loadCompanyContext();
+    const prompt = buildImagePrompt(product, session, companyContext, styleOverride);
+    
+    // Generate image
+    const imageBuffer = await generateImageWithNanoBanana(prompt, 1024, 1024);
+    
+    // Upload to WhatsApp
+    const mediaId = await uploadWhatsAppMedia(imageBuffer);
+    
+    // Send image
+    const productName = product.name || product.title || productQuery;
+    const caption = `${productName} • angle: ${session.angle}`;
+    await sendWhatsAppImage(from, mediaId, caption);
+    
+    // Save to history
+    addToHistory(from, mediaId, caption, productName, session.angle, styleOverride || session.style);
+    
+    console.log(`[Image] Generated for ${from}: ${productName}, angle: ${session.angle}, media_id: ${mediaId}`);
+    
+  } catch (err) {
+    console.error("[Image] Error:", err);
+    await sendWhatsAppMessage(from, `⚠️ Image generation failed. ${err.message}\n\nCheck Nano Banana endpoint or try a simpler style.`);
+  }
+}
+
+async function handleImages(from, params) {
+  try {
+    if (params.length === 0) {
+      await sendWhatsAppMessage(from, "⚠️ Usage: /images <product>");
+      return;
+    }
+    
+    const productQuery = params.join(" ");
+    const product = findProductByName(productQuery);
+    if (!product) {
+      await sendWhatsAppMessage(from, 
+        `⚠️ Product not found: ${productQuery}\n\n` +
+        `Use /products to see all products.`
+      );
+      return;
+    }
+    
+    await sendWhatsAppMessage(from, "🎞️ Generating image pack (3 sizes)...");
+    
+    const session = getSession(from);
+    const companyContext = loadCompanyContext();
+    const prompt = buildImagePrompt(product, session, companyContext);
+    
+    // Generate base image at 1024x1024
+    const baseImage = await generateImageWithNanoBanana(prompt, 1024, 1024);
+    
+    // Resize to different aspects
+    const square = baseImage; // Already 1024x1024
+    const portrait = await sharp(baseImage).resize(1080, 1350, { fit: "cover" }).jpeg({ quality: 87 }).toBuffer();
+    const story = await sharp(baseImage).resize(1080, 1920, { fit: "cover" }).jpeg({ quality: 87 }).toBuffer();
+    
+    const productName = product.name || product.title || productQuery;
+    
+    // Upload and send square
+    const squareMediaId = await uploadWhatsAppMedia(square);
+    await sendWhatsAppImage(from, squareMediaId, `${productName} • Square (1:1) • angle: ${session.angle}`);
+    addToHistory(from, squareMediaId, `${productName} • Square`, productName, session.angle, session.style);
+    
+    // Small delay between uploads
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    
+    // Upload and send portrait
+    const portraitMediaId = await uploadWhatsAppMedia(portrait);
+    await sendWhatsAppImage(from, portraitMediaId, `${productName} • Portrait (4:5) • angle: ${session.angle}`);
+    
+    // Small delay
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    
+    // Upload and send story
+    const storyMediaId = await uploadWhatsAppMedia(story);
+    await sendWhatsAppImage(from, storyMediaId, `${productName} • Story (9:16) • angle: ${session.angle}`);
+    
+    console.log(`[Images] Generated pack for ${from}: ${productName}, media_ids: ${squareMediaId}, ${portraitMediaId}, ${storyMediaId}`);
+    
+  } catch (err) {
+    console.error("[Images] Error:", err);
+    await sendWhatsAppMessage(from, `⚠️ Image generation failed. ${err.message}\n\nCheck Nano Banana endpoint or try a simpler style.`);
+  }
+}
+
+async function handleLast(from) {
+  const last = getLastCreative(from);
+  if (!last) {
+    await sendWhatsAppMessage(from, "⚠️ No recent creative found.\n\nUse /image <product> to generate one.");
+    return;
+  }
+  
+  try {
+    await sendWhatsAppImage(from, last.mediaId, last.caption);
+  } catch (err) {
+    await sendWhatsAppMessage(from, `⚠️ Could not resend image. ${err.message}`);
+  }
+}
+
+async function handleRedo(from) {
+  const last = getLastCreative(from);
+  if (!last) {
+    await sendWhatsAppMessage(from, "⚠️ No recent creative found.\n\nUse /image <product> to generate one.");
+    return;
+  }
+  
+  try {
+    await sendWhatsAppMessage(from, "🔄 Regenerating with new seed...");
+    
+    const product = findProductByName(last.product);
+    if (!product) {
+      await sendWhatsAppMessage(from, `⚠️ Product "${last.product}" not found. Use /image <product> to generate.`);
+      return;
+    }
+    
+    const session = getSession(from);
+    // Restore angle/style from last generation
+    session.angle = last.angle;
+    session.style = last.style;
+    
+    const companyContext = loadCompanyContext();
+    const prompt = buildImagePrompt(product, session, companyContext);
+    
+    // Generate new image
+    const imageBuffer = await generateImageWithNanoBanana(prompt, 1024, 1024);
+    const mediaId = await uploadWhatsAppMedia(imageBuffer);
+    
+    await sendWhatsAppImage(from, mediaId, last.caption);
+    addToHistory(from, mediaId, last.caption, last.product, last.angle, last.style);
+    
+    console.log(`[Redo] Regenerated for ${from}: ${last.product}, media_id: ${mediaId}`);
+    
+  } catch (err) {
+    console.error("[Redo] Error:", err);
+    await sendWhatsAppMessage(from, `⚠️ Regeneration failed. ${err.message}`);
   }
 }
 
@@ -1789,6 +2246,142 @@ app.post("/api/ai/recommendations/:type/apply", (req, res) => {
 });
 app.post("/api/ai/recommendations/:type/dismiss", (req, res) => {
   res.json({ ok: true, message: `Dismissed recommendation: ${req.params.type}` });
+});
+
+// Creatives API endpoints
+app.post("/api/creatives/session", requireAdminKey, (req, res) => {
+  try {
+    const { phone = "dashboard", angle, style } = req.body;
+    const session = getSession(phone);
+    
+    if (angle) {
+      const matchedAngle = matchAngle(angle);
+      if (matchedAngle) {
+        session.angle = matchedAngle;
+      } else {
+        return res.status(400).json({ ok: false, error: `Invalid angle. Available: ${Object.keys(ANGLE_PRESETS).join(", ")}` });
+      }
+    }
+    
+    if (style) {
+      session.style = style;
+    }
+    
+    res.json({ ok: true, angle: session.angle, style: session.style });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post("/api/creatives/generate", requireAdminKey, async (req, res) => {
+  try {
+    const { productQuery, angle, style, pack = false, phone = "dashboard" } = req.body;
+    
+    if (!productQuery) {
+      return res.status(400).json({ ok: false, error: "productQuery is required" });
+    }
+    
+    // Find product
+    const product = findProductByName(productQuery);
+    if (!product) {
+      return res.status(404).json({ ok: false, error: `Product not found: ${productQuery}` });
+    }
+    
+    const session = getSession(phone);
+    const companyContext = loadCompanyContext();
+    
+    // Override session angle/style if provided
+    const finalAngle = angle ? (matchAngle(angle) || session.angle) : session.angle;
+    const finalStyle = style || session.style;
+    
+    const tempSession = { ...session, angle: finalAngle, style: finalStyle };
+    const prompt = buildImagePrompt(product, tempSession, companyContext);
+    
+    // Generate base image
+    const baseImage = await generateImageWithNanoBanana(prompt, 1024, 1024);
+    
+    const productName = product.name || product.title || productQuery;
+    const items = [];
+    
+    if (pack) {
+      // Generate pack: square, portrait, story
+      const square = baseImage;
+      const portrait = await sharp(baseImage).resize(1080, 1350, { fit: "cover" }).jpeg({ quality: 87 }).toBuffer();
+      const story = await sharp(baseImage).resize(1080, 1920, { fit: "cover" }).jpeg({ quality: 87 }).toBuffer();
+      
+      // Upload to WhatsApp and get media IDs
+      const squareMediaId = await uploadWhatsAppMedia(square);
+      const portraitMediaId = await uploadWhatsAppMedia(portrait);
+      const storyMediaId = await uploadWhatsAppMedia(story);
+      
+      // Create base64 previews for dashboard
+      const squarePreview = imageToDataURL(square);
+      const portraitPreview = imageToDataURL(portrait);
+      const storyPreview = imageToDataURL(story);
+      
+      items.push(
+        {
+          mediaId: squareMediaId,
+          caption: `${productName} • Square (1:1) • angle: ${finalAngle}`,
+          aspect: "1:1",
+          previewUrl: squarePreview
+        },
+        {
+          mediaId: portraitMediaId,
+          caption: `${productName} • Portrait (4:5) • angle: ${finalAngle}`,
+          aspect: "4:5",
+          previewUrl: portraitPreview
+        },
+        {
+          mediaId: storyMediaId,
+          caption: `${productName} • Story (9:16) • angle: ${finalAngle}`,
+          aspect: "9:16",
+          previewUrl: storyPreview
+        }
+      );
+      
+      // Save to history
+      addToHistory(phone, squareMediaId, items[0].caption, productName, finalAngle, finalStyle);
+      
+      console.log(`[Creatives API] Generated pack for ${phone}: ${productName}, media_ids: ${squareMediaId}, ${portraitMediaId}, ${storyMediaId}`);
+      
+    } else {
+      // Single square image
+      const mediaId = await uploadWhatsAppMedia(baseImage);
+      const caption = `${productName} • angle: ${finalAngle}`;
+      const previewUrl = imageToDataURL(baseImage);
+      
+      items.push({
+        mediaId,
+        caption,
+        aspect: "1:1",
+        previewUrl
+      });
+      
+      // Save to history
+      addToHistory(phone, mediaId, caption, productName, finalAngle, finalStyle);
+      
+      console.log(`[Creatives API] Generated single for ${phone}: ${productName}, media_id: ${mediaId}`);
+    }
+    
+    res.json({ ok: true, items });
+    
+  } catch (err) {
+    console.error("[Creatives API] Error:", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.get("/api/creatives/last", requireAdminKey, (req, res) => {
+  try {
+    const phone = req.query.phone || "dashboard";
+    const history = creativeHistory.get(phone) || [];
+    const last = history.slice(-10).reverse(); // Last 10, most recent first
+    
+    res.json({ ok: true, items: last });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
 });
 
 const PORT = process.env.PORT || 3000;
