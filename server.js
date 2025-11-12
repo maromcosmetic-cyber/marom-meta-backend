@@ -611,25 +611,55 @@ async function handleNaturalLanguageChat(from, messageText) {
     // Check for product queries
     if (lowerMessage.includes("product") && !lowerMessage.includes("create")) {
       detectedIntent = "products";
-      const products = loadProductsCache();
-      if (products.length > 0) {
-        dataContext += `\n\nAVAILABLE PRODUCTS (${products.length}):\n`;
-        products.slice(0, 5).forEach((p, i) => {
-          const name = p.name || p.title || "Unnamed";
-          const price = p.price ? `$${p.price}` : "N/A";
-          dataContext += `${i + 1}. ${name} - ${price}\n`;
-        });
-        
-        // Try to find specific product mentioned
-        const productMatch = messageText.match(/\b(shampoo|hair|treatment|product|cream|serum|oil|mask)\b/i);
-        if (productMatch) {
-          const foundProduct = await findProductByName(productMatch[0]);
-          if (foundProduct) {
-            dataContext += `\n\nMATCHED PRODUCT DETAILS:\n- Name: ${foundProduct.name}\n- Price: ${foundProduct.price ? `$${foundProduct.price}` : "N/A"}\n- Description: ${(foundProduct.description || foundProduct.short_description || "").substring(0, 200)}`;
+      try {
+        const products = await wooFetch("GET", "/products?per_page=10");
+        if (products && products.length > 0) {
+          dataContext += `\n\nAVAILABLE PRODUCTS (${products.length}):\n`;
+          products.slice(0, 5).forEach((p, i) => {
+            const normalized = normalizeProduct(p);
+            const name = normalized.name || "Unnamed";
+            const price = normalized.price ? `$${normalized.price}` : "N/A";
+            dataContext += `${i + 1}. ${name} - ${price}\n`;
+          });
+          
+          // Try to find specific product mentioned
+          const productMatch = messageText.match(/\b(shampoo|hair|treatment|product|cream|serum|oil|mask)\b/i);
+          if (productMatch) {
+            const foundProduct = await findProductByName(productMatch[0]);
+            if (foundProduct) {
+              dataContext += `\n\nMATCHED PRODUCT DETAILS:\n- Name: ${foundProduct.name}\n- Price: ${foundProduct.price ? `$${foundProduct.price}` : "N/A"}\n- Description: ${(foundProduct.description || foundProduct.short_description || "").substring(0, 200)}`;
+            }
           }
+        } else {
+          dataContext += `\n\nNote: No products found in WooCommerce. Use /products to list all products.`;
         }
-      } else {
-        dataContext += `\n\nNote: No products cached. Use /sync products to fetch from website.`;
+      } catch (err) {
+        dataContext += `\n\nNote: Could not fetch products from WooCommerce. Error: ${err.message}`;
+      }
+    }
+    
+    // Check for product management queries (edit, update, change, set)
+    if ((lowerMessage.includes("edit product") || lowerMessage.includes("update product") || 
+         lowerMessage.includes("change product") || lowerMessage.includes("set product") ||
+         lowerMessage.includes("product title") || lowerMessage.includes("product price") ||
+         lowerMessage.includes("product description")) && !lowerMessage.includes("create")) {
+      detectedIntent = "product_management";
+      try {
+        const products = await wooFetch("GET", "/products?per_page=20");
+        if (products && products.length > 0) {
+          dataContext += `\n\nAVAILABLE PRODUCTS TO MANAGE:\n`;
+          products.slice(0, 10).forEach((p, i) => {
+            const normalized = normalizeProduct(p);
+            dataContext += `${i + 1}. ${normalized.name} (ID: ${normalized.id})\n`;
+          });
+          dataContext += `\n\nPRODUCT MANAGEMENT COMMANDS:\n`;
+          dataContext += `- /product edit <name> title="New Title"\n`;
+          dataContext += `- /product edit <name> price=99.99\n`;
+          dataContext += `- /product edit <name> description="New description"\n`;
+          dataContext += `- /product info <name> - Get full product details\n`;
+        }
+      } catch (err) {
+        dataContext += `\n\nNote: Could not fetch products. Error: ${err.message}`;
       }
     }
     
@@ -688,7 +718,8 @@ async function handleNaturalLanguageChat(from, messageText) {
     systemPrompt += "\nFor image generation requests, respond enthusiastically: 'I'd love to help! Use /image [product] for a single image, or /images [product] for a full pack with all sizes.'";
     systemPrompt += "\nIf you don't have data, guide them naturally: 'Let me check that for you - try /stats or /campaigns to see what's running.'";
     systemPrompt += "\nFor campaign actions, suggest commands naturally: 'Want to pause that campaign? Just use /pause [campaign name].'";
-    systemPrompt += "\nBe proactive and helpful - if they mention a product, offer to generate images or create ads for it.";
+    systemPrompt += "\nFor product management, guide them: 'I can help you edit products! Use /product edit [name] title=\"...\" or price=... to update them.'";
+    systemPrompt += "\nBe proactive and helpful - if they mention a product, offer to generate images, create ads, or help manage product details.";
     
     if (detectedIntent) {
       systemPrompt += `\n\nUser intent detected: ${detectedIntent}`;
@@ -726,7 +757,24 @@ async function handleNaturalLanguageChat(from, messageText) {
     
   } catch (err) {
     console.error("Error processing natural language chat:", err);
-    await sendWhatsAppMessage(from, "⚠️ Couldn't complete action: " + err.message);
+    
+    // More human-friendly error messages
+    let errorMsg = "Sorry, I ran into an issue";
+    if (err.message.includes("loadProductsCache")) {
+      errorMsg = "I'm having trouble accessing products right now. Let me try fetching them fresh from WooCommerce...";
+      try {
+        await wooFetch("GET", "/products?per_page=5");
+        errorMsg = "Products are accessible! Try asking again, or use /products to see all products.";
+      } catch (fetchErr) {
+        errorMsg = "I can't connect to WooCommerce right now. Please check:\n• WC_API_URL is set correctly\n• WC_API_KEY and WC_API_SECRET are valid\n• WooCommerce REST API is enabled";
+      }
+    } else if (err.message.includes("WooCommerce") || err.message.includes("woo")) {
+      errorMsg = `I'm having trouble connecting to WooCommerce: ${err.message}\n\nTry:\n• /products - List products\n• /test products - Test connection`;
+    } else {
+      errorMsg = `I couldn't complete that: ${err.message}\n\nTry rephrasing your request or use /help for available commands.`;
+    }
+    
+    await sendWhatsAppMessage(from, errorMsg);
   }
 }
 
@@ -836,7 +884,7 @@ async function executeCommand(from, command, params, confirmed = false) {
         
       case "/product":
         result.success = true;
-        await handleProduct(from, params.join(" "));
+        await handleProduct(from, params);
         break;
         
       case "/sync":
@@ -979,43 +1027,37 @@ async function handleTestApi(from) {
 
 async function handleTestProducts(from) {
   try {
-    const PRODUCTS_URL = process.env.PRODUCTS_URL || "https://maromcosmetic.com/products.json";
-    const cached = loadProductsCache();
-    const cacheAge = getProductsCacheAge();
-    const cacheAgeHours = cacheAge / (1000 * 60 * 60);
-    
-    await sendWhatsAppMessage(from, `🔍 Testing product website access...\n\nURL: ${PRODUCTS_URL}`);
+    await sendWhatsAppMessage(from, `🔍 Testing WooCommerce connection...\n\nAPI: ${WC_API_URL}`);
     
     try {
-      const products = await fetchProductsFromWebsite();
+      const products = await wooFetch("GET", "/products?per_page=1");
       
-      let msg = "✅ Website Access Successful!\n\n";
-      msg += `• URL: ${PRODUCTS_URL}\n`;
-      msg += `• Products Found: ${products.length}\n`;
-      msg += `• Cache: ${cached.length} products (${cacheAgeHours.toFixed(1)}h old)\n\n`;
+      let msg = "✅ WooCommerce Connection Successful!\n\n";
+      msg += `• API URL: ${WC_API_URL}\n`;
+      msg += `• Products Found: ${products ? products.length : 0}\n`;
+      msg += `• Source: WooCommerce REST API\n\n`;
       
-      if (products.length > 0) {
-        msg += `Sample products:\n`;
-        products.slice(0, 3).forEach((p, i) => {
-          const name = p.name || p.title || "Unnamed";
-          msg += `${i + 1}. ${name}\n`;
-        });
+      if (products && products.length > 0) {
+        const normalized = normalizeProduct(products[0]);
+        msg += `Sample product:\n`;
+        msg += `• ${normalized.name}\n`;
+        msg += `• Price: $${normalized.price}\n`;
+        msg += `• SKU: ${normalized.sku || "N/A"}\n`;
+        msg += `• Stock: ${normalized.stock_status}\n`;
       } else {
-        msg += `⚠️ Website returned empty data. Check response format.`;
+        msg += `⚠️ No products found. Check your WooCommerce store.`;
       }
       
       await sendWhatsAppMessage(from, msg);
     } catch (fetchErr) {
-      let msg = "❌ Website Access Failed\n\n";
-      msg += `• URL: ${PRODUCTS_URL}\n`;
+      let msg = "❌ WooCommerce Connection Failed\n\n";
+      msg += `• API URL: ${WC_API_URL}\n`;
       msg += `• Error: ${fetchErr.message}\n\n`;
-      msg += `Current Cache: ${cached.length} products\n`;
-      msg += `Cache Age: ${cacheAgeHours.toFixed(1)} hours\n\n`;
       msg += `Troubleshooting:\n`;
-      msg += `1. Verify URL in browser\n`;
-      msg += `2. Check PRODUCTS_URL env var\n`;
-      msg += `3. Website may block bots\n`;
-      msg += `4. Check network/firewall`;
+      msg += `1. Check WC_API_URL, WC_API_KEY, WC_API_SECRET\n`;
+      msg += `2. Verify WooCommerce REST API is enabled\n`;
+      msg += `3. Check API key permissions\n`;
+      msg += `4. Test URL: ${WC_API_URL}?consumer_key=XXX&consumer_secret=XXX`;
       
       await sendWhatsAppMessage(from, msg);
     }
@@ -1536,69 +1578,125 @@ async function handleAlerts(from, action) {
 
 async function handleProducts(from) {
   try {
-    const products = loadProductsCache();
+    const products = await wooFetch("GET", "/products?per_page=50");
     
-    if (products.length === 0) {
-      await sendWhatsAppMessage(from, "📦 No products found. Use /sync products to fetch from website.");
+    if (!products || products.length === 0) {
+      await sendWhatsAppMessage(from, "📦 No products found in WooCommerce.\n\nMake sure:\n• WooCommerce is set up\n• Products exist in your store\n• API credentials are correct");
       return;
     }
     
     let msg = `📦 Products (${products.length}):\n\n`;
     products.slice(0, 10).forEach((p, i) => {
-      const name = p.name || p.title || "Unnamed";
-      const price = p.price ? `$${p.price}` : "N/A";
-      const desc = (p.description || p.short_description || "").substring(0, 50);
+      const normalized = normalizeProduct(p);
+      const name = normalized.name || "Unnamed";
+      const price = normalized.price ? `$${normalized.price}` : "N/A";
+      const desc = (normalized.description || normalized.short_description || "").substring(0, 50);
       msg += `${i + 1}. ${name}\n💰 ${price}${desc ? `\n${desc}...` : ""}\n\n`;
     });
     
     if (products.length > 10) {
-      msg += `...and ${products.length - 10} more\n\nUse /product <name> for details`;
+      msg += `...and ${products.length - 10} more\n\nUse /product <name> for details\nOr /product edit <name> to manage`;
     }
     
     await sendWhatsAppMessage(from, msg);
   } catch (err) {
-    throw new Error("Failed to list products: " + err.message);
+    await sendWhatsAppMessage(from, `❌ Couldn't fetch products: ${err.message}\n\nTry /test products to check connection`);
   }
 }
 
-async function handleProduct(from, name) {
+async function handleProduct(from, params) {
   try {
-    if (!name) {
-      await sendWhatsAppMessage(from, "⚠️ Usage: /product <name>");
+    if (!params || params.length === 0) {
+      await sendWhatsAppMessage(from, "📦 Product Commands:\n\n• /product <name> - Get product info\n• /product edit <name> title=\"New Title\" - Edit title\n• /product edit <name> price=99.99 - Edit price\n• /product edit <name> description=\"New desc\" - Edit description\n• /product info <name> - Full details");
       return;
     }
     
-    const product = findProductByName(name);
+    const action = params[0]?.toLowerCase();
+    
+    // Handle edit command
+    if (action === "edit" && params.length >= 3) {
+      if (!isAdmin(from)) {
+        await sendWhatsAppMessage(from, "⚠️ Product editing requires admin access.");
+        return;
+      }
+      
+      const productName = params[1];
+      const updates = {};
+      
+      // Parse update parameters (title="...", price=99.99, description="...")
+      for (let i = 2; i < params.length; i++) {
+        const param = params[i];
+        if (param.includes("=")) {
+          const [key, ...valueParts] = param.split("=");
+          const value = valueParts.join("=").replace(/^["']|["']$/g, ""); // Remove quotes
+          updates[key.trim()] = value.trim();
+        }
+      }
+      
+      if (Object.keys(updates).length === 0) {
+        await sendWhatsAppMessage(from, "⚠️ No updates specified.\n\nExample: /product edit shampoo title=\"New Title\" price=29.99");
+        return;
+      }
+      
+      // Find product
+      const product = await findProductByName(productName);
+      if (!product) {
+        await sendWhatsAppMessage(from, `❌ Product not found: ${productName}\n\nUse /products to see all products.`);
+        return;
+      }
+      
+      // Update via WooCommerce API
+      const updateData = {};
+      if (updates.title) updateData.name = updates.title;
+      if (updates.price) updateData.regular_price = updates.price.toString();
+      if (updates.description) updateData.description = updates.description;
+      if (updates.short_description) updateData.short_description = updates.short_description;
+      
+      await wooFetch("PUT", `/products/${product.id}`, updateData);
+      
+      let updateMsg = `✅ Updated ${product.name}:\n\n`;
+      Object.keys(updates).forEach(key => {
+        updateMsg += `• ${key}: ${updates[key]}\n`;
+      });
+      
+      await sendWhatsAppMessage(from, updateMsg);
+      return;
+    }
+    
+    // Handle info command or default to showing product info
+    const searchName = action === "info" ? params.slice(1).join(" ") : params.join(" ");
+    const product = await findProductByName(searchName);
     
     if (!product) {
-      await sendWhatsAppMessage(from, `⚠️ Product not found: ${name}\n\nUse /products to see all products.`);
+      await sendWhatsAppMessage(from, `❌ Product not found: ${searchName}\n\nUse /products to see all products.`);
       return;
     }
     
     const productName = product.name || "Unnamed";
     const price = product.price ? `$${product.price}` : "N/A";
+    const salePrice = product.sale_price ? ` (Sale: $${product.sale_price})` : "";
     const description = product.description || product.short_description || "No description";
-    const benefits = product.benefits || product.features || [];
-    const url = product.url || product.link || "";
+    const stockStatus = product.stock_status === "instock" ? "✅ In Stock" : "❌ Out of Stock";
+    const stockQty = product.stock_quantity !== null ? ` (${product.stock_quantity} available)` : "";
+    const categories = product.categories && product.categories.length > 0 
+      ? product.categories.map(c => c.name).join(", ") 
+      : "None";
     
     let msg = `📦 ${productName}\n\n`;
-    msg += `💰 Price: ${price}\n\n`;
-    msg += `📝 Description:\n${description.substring(0, 300)}${description.length > 300 ? "..." : ""}\n`;
+    msg += `💰 Price: ${price}${salePrice}\n`;
+    msg += `📊 Stock: ${stockStatus}${stockQty}\n`;
+    msg += `🏷️ Categories: ${categories}\n`;
+    msg += `📝 Description:\n${description.substring(0, 400)}${description.length > 400 ? "..." : ""}\n`;
     
-    if (benefits.length > 0) {
-      msg += `\n✨ Benefits:\n`;
-      benefits.slice(0, 5).forEach(b => {
-        msg += `• ${b}\n`;
-      });
+    if (product.permalink) {
+      msg += `\n🔗 ${product.permalink}`;
     }
     
-    if (url) {
-      msg += `\n🔗 ${url}`;
-    }
+    msg += `\n\n💡 To edit: /product edit ${productName} title="..." price=...`;
     
     await sendWhatsAppMessage(from, msg);
   } catch (err) {
-    throw new Error("Failed to get product: " + err.message);
+    await sendWhatsAppMessage(from, `❌ Couldn't get product info: ${err.message}\n\nTry /products to list all products.`);
   }
 }
 
@@ -1663,7 +1761,11 @@ function getHelpMessage() {
     `*📦 PRODUCTS*\n` +
     `/products - List all products\n` +
     `/product <name> - Get product details\n` +
-    `/sync products - Refresh from website\n\n` +
+    `/product edit <name> title="..." - Edit title\n` +
+    `/product edit <name> price=99.99 - Edit price\n` +
+    `/product edit <name> description="..." - Edit description\n` +
+    `/product info <name> - Full product info\n` +
+    `/sync products - Refresh from WooCommerce\n\n` +
     `*📋 PROFILE*\n` +
     `/profile show - View profile\n` +
     `/profile update key=value - Update field\n` +
