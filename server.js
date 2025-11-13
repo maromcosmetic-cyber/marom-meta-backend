@@ -492,21 +492,7 @@ const WHATSAPP_PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID;
 const WHATSAPP_ACCESS_TOKEN = process.env.WHATSAPP_ACCESS_TOKEN || TOKEN; // Can use same token if it has WhatsApp permissions
 const ADMIN_NUMBERS = (process.env.ADMIN_NUMBERS || "").split(",").map(s => s.trim()).filter(Boolean);
 
-// Nano Banana configuration
-const NB_BASE_URL = process.env.NB_BASE_URL; // Required, no default
-const NB_API_KEY = process.env.NB_API_KEY; // Optional
-const NB_TIMEOUT_MS = parseInt(process.env.NB_TIMEOUT_MS) || 60000;
 const ADMIN_DASH_KEY = process.env.ADMIN_DASH_KEY;
-
-// Create reusable axios instance for Nano Banana API
-const nbApi = axios.create({
-  baseURL: NB_BASE_URL,
-  timeout: NB_TIMEOUT_MS,
-  headers: {
-    "Content-Type": "application/json",
-    ...(NB_API_KEY && { Authorization: `Bearer ${NB_API_KEY}` })
-  }
-});
 
 // Admin key middleware
 function requireAdminKey(req, res, next) {
@@ -1801,7 +1787,7 @@ async function handleNaturalLanguageChat(from, messageText) {
               
               await sendWhatsAppMessage(from, `✨ Generating image with enhanced prompt...`);
               
-              // Generate image (uses Vertex AI or Nano Banana)
+              // Generate image using Vertex AI
               const imageBuffer = await generateImageWithEngine(prompt, "1:1", 1024, 1024);
               
               // Upload to WhatsApp
@@ -3240,7 +3226,7 @@ async function sendWhatsAppImage(to, mediaId, caption = "") {
   }
 }
 
-// Check if image generation is available (Vertex AI or Nano Banana)
+// Check if image generation is available (Vertex AI)
 async function checkImageConfig() {
   // Check if Vertex AI module actually exists before preferring it
   let vertexAvailable = false;
@@ -3317,16 +3303,10 @@ async function checkImageConfig() {
     return "vertex";
   }
   
-  // Fallback to Nano Banana if configured
-  if (NB_BASE_URL) {
-    console.log("[Image Config] Using Nano Banana as image engine");
-    return "nanobanana";
-  }
-  
-  throw new Error("Image engine not configured. For Vertex AI: Set GOOGLE_CLOUD_PROJECT and either GOOGLE_APPLICATION_CREDENTIALS (file path) or GOOGLE_PRIVATE_KEY + GOOGLE_CLIENT_EMAIL (env vars). For Nano Banana: Set NB_BASE_URL.");
+  throw new Error("Image engine not configured. Set GOOGLE_CLOUD_PROJECT and either GOOGLE_APPLICATION_CREDENTIALS (file path) or GOOGLE_PRIVATE_KEY + GOOGLE_CLIENT_EMAIL (env vars) for Vertex AI.");
 }
 
-// Generate image (uses Vertex AI Imagen 3 or Nano Banana fallback)
+// Generate image using Vertex AI Imagen 3
 async function generateImageWithEngine(prompt, aspectRatio = "1:1", width = 1024, height = 1024) {
   try {
     const engine = await checkImageConfig();
@@ -3376,24 +3356,12 @@ async function generateImageWithEngine(prompt, aspectRatio = "1:1", width = 1024
             code: importErr.code,
             path: importErr.path || "unknown"
           });
-          // Fallback to Nano Banana if Vertex AI import fails
-          if (NB_BASE_URL) {
-            console.log("[Image Generation] Falling back to Nano Banana due to Vertex AI import error");
-            // Fall through to Nano Banana code below by throwing a specific error
-            throw new Error("Vertex AI import failed, using Nano Banana");
-          } else {
-            throw new Error(`Vertex AI service not available: ${importErr.message}`);
-          }
+          throw new Error(`Vertex AI service not available: ${importErr.message}`);
         }
         
         // Only execute if import succeeded
         if (!generateImage) {
-          // Import failed, fall through to Nano Banana
-          if (NB_BASE_URL) {
-            throw new Error("Vertex AI import failed, using Nano Banana");
-          } else {
-            throw new Error("Vertex AI service not available");
-          }
+          throw new Error("Vertex AI service not available");
         }
         
         const result = await generateImage(prompt, aspectRatio);
@@ -3414,49 +3382,12 @@ async function generateImageWithEngine(prompt, aspectRatio = "1:1", width = 1024
         
         return jpegBuffer;
       } catch (err) {
-        console.error("[Vertex AI] Image generation failed, trying Nano Banana fallback:", err.message);
-        // Fall through to Nano Banana if Vertex fails
-        if (!NB_BASE_URL) throw err; // Re-throw if no fallback
+        console.error("[Vertex AI] Image generation failed:", err.message);
+        throw err;
       }
     }
     
-    // Fallback to Nano Banana
-    if (NB_BASE_URL) {
-      console.log(`[Nano Banana] POST /generate ${width}x${height}`);
-      
-      const response = await nbApi.post(
-        "/generate",
-        {
-          prompt: prompt,
-          width: width,
-          height: height,
-          steps: 28,
-          guidance_scale: 4.5,
-          negative_prompt: "text, price, watermark, logo, blurry, low quality"
-        },
-        {
-          responseType: "arraybuffer"
-        }
-      );
-      
-      console.log(`[Nano Banana] POST /generate ${response.status}`);
-      
-      const jpegBuffer = await sharp(Buffer.from(response.data))
-        .jpeg({ quality: 87 })
-        .toBuffer();
-      
-      if (jpegBuffer.length > 4.5 * 1024 * 1024) {
-        const resized = await sharp(jpegBuffer)
-          .resize(1024, 1024, { fit: "inside", withoutEnlargement: true })
-          .jpeg({ quality: 85 })
-          .toBuffer();
-        return resized;
-      }
-      
-      return jpegBuffer;
-    }
-    
-    throw new Error("No image engine available");
+    throw new Error("Vertex AI not configured");
   } catch (err) {
     if (err.code === "ECONNREFUSED" || err.code === "ETIMEDOUT" || err.code === "ENOTFOUND") {
       throw {
@@ -3803,7 +3734,7 @@ async function handleImage(from, params) {
     
     await sendWhatsAppMessage(from, "✨ Generating image with enhanced prompt...");
     
-    // Generate image (uses Vertex AI or Nano Banana)
+    // Generate image using Vertex AI
     let imageBuffer;
     try {
       imageBuffer = await generateImageWithEngine(prompt, "1:1", 1024, 1024);
@@ -3815,57 +3746,7 @@ async function handleImage(from, params) {
       const errorMessage = err.message || (typeof err === 'string' ? err : JSON.stringify(err));
       const errorStatus = err.status;
       
-      // If Vertex AI import fails or any error, try Nano Banana directly
-      if (errorMessage.includes("Cannot find module") || 
-          errorMessage.includes("vertexService") || 
-          errorMessage.includes("Vertex AI") ||
-          errorStatus === 503) {
-        if (NB_BASE_URL) {
-          console.log("[Image] Vertex AI not available, using Nano Banana fallback");
-          await sendWhatsAppMessage(from, "🔄 Using alternative image engine...");
-          
-          try {
-            const response = await nbApi.post(
-              "/generate",
-              {
-                prompt: prompt,
-                width: 1024,
-                height: 1024,
-                steps: 28,
-                guidance_scale: 4.5,
-                negative_prompt: "text, price, watermark, logo, blurry, low quality"
-              },
-              {
-                responseType: "arraybuffer",
-                timeout: 60000
-              }
-            );
-            
-            console.log(`[Image] Nano Banana response status: ${response.status}`);
-            
-            imageBuffer = await sharp(Buffer.from(response.data))
-              .jpeg({ quality: 87 })
-              .toBuffer();
-              
-            if (imageBuffer.length > 4.5 * 1024 * 1024) {
-              imageBuffer = await sharp(imageBuffer)
-                .resize(1024, 1024, { fit: "inside", withoutEnlargement: true })
-                .jpeg({ quality: 85 })
-                .toBuffer();
-            }
-            
-            console.log(`[Image] Nano Banana image generated: ${imageBuffer.length} bytes`);
-          } catch (nbErr) {
-            console.error("[Image] Nano Banana error:", nbErr.message);
-            console.error("[Image] Nano Banana error details:", nbErr.response?.data || nbErr);
-            throw new Error(`Image generation failed: ${nbErr.message || 'Unknown error'}`);
-          }
-        } else {
-          throw new Error("Image generation service not available. Vertex AI module not found and Nano Banana not configured. Please set NB_BASE_URL environment variable.");
-        }
-      } else {
-        throw err; // Re-throw other errors
-      }
+      throw err; // Re-throw all errors
     }
     
     // Upload to WhatsApp
@@ -3886,9 +3767,9 @@ async function handleImage(from, params) {
     
     let errorMsg = "⚠️ Image generation failed.";
     if (err.status === 503) {
-      errorMsg = "⚠️ Image engine not configured. Set GOOGLE_CLOUD_PROJECT and GOOGLE_APPLICATION_CREDENTIALS for Vertex AI, or NB_BASE_URL for Nano Banana.";
+      errorMsg = "⚠️ Image engine not configured. Set GOOGLE_CLOUD_PROJECT and GOOGLE_APPLICATION_CREDENTIALS for Vertex AI.";
     } else if (err.status === 502) {
-      errorMsg = `⚠️ Image engine unreachable (${err.details || "connection error"}).\n\nCheck your Vertex AI or Nano Banana configuration.`;
+      errorMsg = `⚠️ Image engine unreachable (${err.details || "connection error"}).\n\nCheck your Vertex AI configuration.`;
     } else if (err.message) {
       errorMsg = `⚠️ ${err.message}`;
     }
@@ -3924,7 +3805,7 @@ async function handleImages(from, params) {
     
     await sendWhatsAppMessage(from, "✨ Generating image pack (3 sizes) with enhanced prompt...");
     
-    // Generate base image at 1024x1024 (uses Vertex AI or Nano Banana)
+    // Generate base image at 1024x1024 using Vertex AI
     const baseImage = await generateImageWithEngine(prompt, "1:1", 1024, 1024);
     
     // Resize to different aspects
@@ -3960,9 +3841,9 @@ async function handleImages(from, params) {
     
     let errorMsg = "⚠️ Image generation failed.";
     if (err.status === 503) {
-      errorMsg = "⚠️ Image engine not configured. Set GOOGLE_CLOUD_PROJECT and GOOGLE_APPLICATION_CREDENTIALS for Vertex AI, or NB_BASE_URL for Nano Banana.";
+      errorMsg = "⚠️ Image engine not configured. Set GOOGLE_CLOUD_PROJECT and GOOGLE_APPLICATION_CREDENTIALS for Vertex AI.";
     } else if (err.status === 502) {
-      errorMsg = `⚠️ Image engine unreachable (${err.details || "connection error"}).\n\nCheck your Vertex AI or Nano Banana configuration.`;
+      errorMsg = `⚠️ Image engine unreachable (${err.details || "connection error"}).\n\nCheck your Vertex AI configuration.`;
     } else if (err.message) {
       errorMsg = `⚠️ ${err.message}`;
     }
@@ -4013,7 +3894,7 @@ async function handleRedo(from) {
     
     await sendWhatsAppMessage(from, "✨ Regenerating with enhanced prompt...");
     
-    // Generate new image (uses Vertex AI or Nano Banana)
+    // Generate new image using Vertex AI
     const imageBuffer = await generateImageWithEngine(prompt, "1:1", 1024, 1024);
     const mediaId = await uploadWhatsAppMedia(imageBuffer);
     
@@ -4027,9 +3908,9 @@ async function handleRedo(from) {
     
     let errorMsg = "⚠️ Regeneration failed.";
     if (err.status === 503) {
-      errorMsg = "⚠️ Image engine not configured. Set GOOGLE_CLOUD_PROJECT and GOOGLE_APPLICATION_CREDENTIALS for Vertex AI, or NB_BASE_URL for Nano Banana.";
+      errorMsg = "⚠️ Image engine not configured. Set GOOGLE_CLOUD_PROJECT and GOOGLE_APPLICATION_CREDENTIALS for Vertex AI.";
     } else if (err.status === 502) {
-      errorMsg = `⚠️ Image engine unreachable (${err.details || "connection error"}).\n\nCheck your Vertex AI or Nano Banana configuration.`;
+      errorMsg = `⚠️ Image engine unreachable (${err.details || "connection error"}).\n\nCheck your Vertex AI configuration.`;
     } else if (err.message) {
       errorMsg = `⚠️ ${err.message}`;
     }
@@ -4960,7 +4841,7 @@ app.post("/api/creatives/generate", requireAdminKey, async (req, res) => {
     const tempSession = { ...session, angle: finalAngle, style: finalStyle };
     const prompt = buildImagePrompt(product, tempSession, companyContext);
     
-    // Generate base image (uses Vertex AI or Nano Banana)
+    // Generate base image using Vertex AI
     let baseImage;
     try {
       baseImage = await generateImageWithEngine(prompt, "1:1", 1024, 1024);
