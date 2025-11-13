@@ -91,8 +91,9 @@ export async function generateImage(prompt, aspectRatio = "1:1", productContext 
       parameters: {
         sampleCount: 1,
         aspectRatio: ratio,
-        safetyFilterLevel: "block_some",
-        personGeneration: "allow_all"
+        safetyFilterLevel: "block_some"
+        // Note: personGeneration removed - "allow_all" is not available for this project
+        // If you need person generation, configure it in Google Cloud Console safety settings
       }
     };
     
@@ -234,8 +235,9 @@ export async function editImage(prompt, productImageUrl, maskPngUrl = null) {
       }],
       parameters: {
         sampleCount: 1,
-        safetyFilterLevel: "block_some",
-        personGeneration: "allow_all"
+        safetyFilterLevel: "block_some"
+        // Note: personGeneration removed - "allow_all" is not available for this project
+        // If you need person generation, configure it in Google Cloud Console safety settings
       }
     };
     
