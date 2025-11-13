@@ -7,7 +7,25 @@ import { GoogleAuth } from "google-auth-library";
  */
 
 const PROJECT_ID = process.env.GOOGLE_CLOUD_PROJECT || "marom-api";
-const LOCATION = process.env.GOOGLE_CLOUD_LOCATION || "us-central1";
+
+// Validate location - Vertex AI requires a specific region, not "global"
+let LOCATION = process.env.GOOGLE_CLOUD_LOCATION || "us-central1";
+const VALID_LOCATIONS = [
+  "us-central1", "us-east1", "us-east4", "us-west1", "us-west2", "us-west3", "us-west4",
+  "europe-west1", "europe-west2", "europe-west3", "europe-west4", "europe-west6", "europe-west8", "europe-west9",
+  "asia-east1", "asia-northeast1", "asia-northeast2", "asia-northeast3", "asia-south1", "asia-southeast1",
+  "australia-southeast1", "northamerica-northeast1", "southamerica-east1"
+];
+
+// Normalize location (remove trailing slashes, convert to lowercase)
+LOCATION = LOCATION.trim().toLowerCase().replace(/\/$/, "");
+
+// Check if location is invalid
+if (LOCATION === "global" || !VALID_LOCATIONS.includes(LOCATION)) {
+  console.warn(`[Vertex] Invalid location "${LOCATION}". Using default "us-central1". Valid locations: ${VALID_LOCATIONS.join(", ")}`);
+  LOCATION = "us-central1";
+}
+
 const VERTEX_API_BASE = `https://${LOCATION}-aiplatform.googleapis.com/v1`;
 
 /**
