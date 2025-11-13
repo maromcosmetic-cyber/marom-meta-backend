@@ -5460,7 +5460,42 @@ function addMediaRoutesDirectly() {
   app.post("/api/media/create", requireAdminKey, async (req, res) => {
     console.log("[Media API] Direct route handler called");
     try {
-      const { generateImage } = await import("./services/vertexService.js");
+      // Try multiple import paths
+      let generateImage;
+      const possiblePaths = [
+        "./services/vertexService.js",
+        path.join(__dirname, "services", "vertexService.js"),
+        path.join(process.cwd(), "services", "vertexService.js")
+      ];
+      
+      let importError = null;
+      for (const importPath of possiblePaths) {
+        try {
+          const vertexModule = await import(importPath.startsWith(".") ? importPath : `file://${importPath}`);
+          generateImage = vertexModule.generateImage;
+          if (generateImage) {
+            console.log(`[Media API] Successfully imported vertexService from: ${importPath}`);
+            break;
+          }
+        } catch (err) {
+          importError = err;
+          continue;
+        }
+      }
+      
+      if (!generateImage) {
+        // Check if file exists
+        const vertexServicePath = path.join(__dirname, "services", "vertexService.js");
+        const fileExists = fs.existsSync(vertexServicePath);
+        console.error(`[Media API] vertexService.js not found. Path: ${vertexServicePath}, Exists: ${fileExists}`);
+        console.error(`[Media API] Import error:`, importError?.message);
+        return res.status(503).json({ 
+          success: false, 
+          error: "Vertex AI service not available. Please ensure services/vertexService.js is deployed.",
+          details: importError?.message || "File not found"
+        });
+      }
+      
       const { mode, prompt, aspectRatio, productId, productQuery } = req.body;
       
       if (!mode || !prompt) {
@@ -5498,7 +5533,12 @@ function addMediaRoutesDirectly() {
       res.send(result.buffer);
     } catch (err) {
       console.error("[Media API] Direct route error:", err);
-      res.status(500).json({ success: false, error: err.message });
+      console.error("[Media API] Error stack:", err.stack);
+      res.status(500).json({ 
+        success: false, 
+        error: err.message || "Image generation failed",
+        details: process.env.NODE_ENV === 'development' ? err.stack : undefined
+      });
     }
   });
   
