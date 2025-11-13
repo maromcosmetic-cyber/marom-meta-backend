@@ -5104,8 +5104,8 @@ async function loadVertexRoutes() {
     console.log("[Route Loading] Attempting to load whatsapp.js...");
     let whatsappWebhookRoutes = null;
     const possibleWhatsappPaths = [
-      "./whatsapp.js",  // Root directory (matches git)
-      "./routes/whatsapp.js"  // Routes subdirectory (fallback)
+      "./routes/whatsapp.js",  // Routes subdirectory (preferred - file exists here)
+      "./whatsapp.js"  // Root directory (fallback)
     ];
     
     for (const whatsappPath of possibleWhatsappPaths) {
@@ -5113,20 +5113,35 @@ async function loadVertexRoutes() {
         ? path.join(__dirname, whatsappPath.replace("./", ""))
         : path.join(__dirname, whatsappPath);
       
+      console.log(`[Route Loading] Checking WhatsApp route path: ${whatsappRoutePath}`);
+      console.log(`[Route Loading] File exists: ${fs.existsSync(whatsappRoutePath)}`);
+      
       if (fs.existsSync(whatsappRoutePath)) {
         try {
-          whatsappWebhookRoutes = (await import(whatsappPath)).default;
-          console.log(`[Route Loading] Loaded WhatsApp routes from: ${whatsappPath}`);
+          const imported = await import(whatsappPath);
+          whatsappWebhookRoutes = imported.default || imported;
+          console.log(`[Route Loading] ✅ Loaded WhatsApp routes from: ${whatsappPath}`);
+          console.log(`[Route Loading] Router type: ${typeof whatsappWebhookRoutes}`);
           break;
         } catch (e) {
-          console.warn(`[Route Loading] Failed to load from ${whatsappPath}:`, e.message);
+          console.error(`[Route Loading] ❌ Failed to load from ${whatsappPath}:`, e.message);
+          console.error(`[Route Loading] Error stack:`, e.stack);
         }
+      } else {
+        console.log(`[Route Loading] ⚠️ WhatsApp route file not found at: ${whatsappRoutePath}`);
       }
     }
     
     app.use("/api/media", mediaRoutes);
     if (whatsappWebhookRoutes) {
       app.use("/webhooks/whatsapp", whatsappWebhookRoutes);
+      console.log("✅ WhatsApp webhook routes registered");
+      console.log("   - POST /webhooks/whatsapp");
+      console.log("   - GET /webhooks/whatsapp (verification)");
+      console.log("   - GET /webhooks/whatsapp/test");
+    } else {
+      console.warn("⚠️ WhatsApp webhook routes not loaded");
+      console.warn("   Check that routes/whatsapp.js exists and exports router correctly");
     }
     
     // Load image generator routes
