@@ -5069,18 +5069,49 @@ app.post("/api/creatives/video", requireAdminKey, async (req, res) => {
 // Mount new routes (optional - only if files exist)
 async function loadVertexRoutes() {
   try {
+    console.log("[Route Loading] Attempting to load routes/media.js...");
+    
+    // Check if file exists first
+    const mediaRoutePath = path.join(__dirname, "routes", "media.js");
+    if (!fs.existsSync(mediaRoutePath)) {
+      console.warn(`⚠️ routes/media.js not found at ${mediaRoutePath}`);
+      console.warn("   Routes will be added directly in server.js");
+      return false;
+    }
+    
     const mediaRoutes = (await import("./routes/media.js")).default;
-    const whatsappWebhookRoutes = (await import("./routes/whatsapp.js")).default;
+    if (!mediaRoutes) {
+      console.error("❌ routes/media.js did not export a default router");
+      return false;
+    }
+    
+    console.log("[Route Loading] Attempting to load routes/whatsapp.js...");
+    const whatsappRoutePath = path.join(__dirname, "routes", "whatsapp.js");
+    let whatsappWebhookRoutes = null;
+    if (fs.existsSync(whatsappRoutePath)) {
+      whatsappWebhookRoutes = (await import("./routes/whatsapp.js")).default;
+    } else {
+      console.warn("⚠️ routes/whatsapp.js not found, skipping WhatsApp routes");
+    }
+    
     app.use("/api/media", mediaRoutes);
-    app.use("/webhooks/whatsapp", whatsappWebhookRoutes);
+    if (whatsappWebhookRoutes) {
+      app.use("/webhooks/whatsapp", whatsappWebhookRoutes);
+    }
+    
     console.log("✅ Vertex AI Content Creator routes loaded");
     console.log("   - POST /api/media/create");
-    console.log("   - POST /webhooks/whatsapp");
+    console.log("   - GET /api/media/test");
+    if (whatsappWebhookRoutes) {
+      console.log("   - POST /webhooks/whatsapp");
+    }
+    return true;
   } catch (err) {
     console.error("❌ Error loading Vertex AI Content Creator routes:", err);
     console.error("   Error details:", err.message);
     console.error("   Stack:", err.stack);
     console.warn("   Make sure routes/media.js and routes/whatsapp.js are deployed.");
+    return false;
   }
 }
 
@@ -5411,8 +5442,80 @@ app.get("/api/vertex/diagnostic", requireAdminKey, async (req, res) => {
   }
 });
 
+// Always add media routes directly (fallback if route file doesn't load)
+function addMediaRoutesDirectly() {
+  console.log("[Route Loading] Adding media routes directly in server.js...");
+  
+  // Test endpoint
+  app.get("/api/media/test", (req, res) => {
+    res.json({ 
+      success: true, 
+      message: "Media API direct route is working", 
+      timestamp: new Date().toISOString(),
+      source: "server.js direct route"
+    });
+  });
+  
+  // Image generation endpoint
+  app.post("/api/media/create", requireAdminKey, async (req, res) => {
+    console.log("[Media API] Direct route handler called");
+    try {
+      const { generateImage } = await import("./services/vertexService.js");
+      const { mode, prompt, aspectRatio, productId, productQuery } = req.body;
+      
+      if (!mode || !prompt) {
+        return res.status(400).json({ success: false, error: "Missing mode or prompt" });
+      }
+      
+      if (mode !== "image") {
+        return res.status(400).json({ success: false, error: "Only image mode supported in direct route" });
+      }
+      
+      // Optional: Load product context if productId provided
+      let productContext = null;
+      if (productId || productQuery) {
+        try {
+          const { findProduct, getProductSummary, isWooCommerceConfigured } = await import("./services/wooService.js");
+          if (isWooCommerceConfigured()) {
+            const product = await findProduct(productId || productQuery);
+            if (product) {
+              productContext = getProductSummary(product);
+            }
+          }
+        } catch (productErr) {
+          console.warn("[Media API] Could not load product context:", productErr.message);
+        }
+      }
+      
+      const result = await generateImage(prompt, aspectRatio || "1:1", productContext);
+      res.set({
+        "Content-Type": result.mimeType,
+        "Content-Length": result.buffer.length,
+        "X-Model": result.model,
+        "X-Mode": mode,
+        "X-Source": "server.js-direct"
+      });
+      res.send(result.buffer);
+    } catch (err) {
+      console.error("[Media API] Direct route error:", err);
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+  
+  console.log("✅ Media routes added directly");
+  console.log("   - GET /api/media/test");
+  console.log("   - POST /api/media/create");
+}
+
 // Load routes before starting server
-await loadVertexRoutes();
+const routesLoaded = await loadVertexRoutes();
+if (!routesLoaded) {
+  console.log("⚠️ Route file loading failed, using direct routes");
+  addMediaRoutesDirectly();
+} else {
+  // Still add direct routes as backup (they won't conflict)
+  console.log("✅ Route files loaded successfully");
+}
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`✅ Backend on http://localhost:${PORT}`));
