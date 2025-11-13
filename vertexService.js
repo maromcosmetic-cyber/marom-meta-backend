@@ -37,8 +37,13 @@ const VERTEX_API_BASE = `https://${LOCATION}-aiplatform.googleapis.com/v1`;
  */
 export async function generateImage(prompt, aspectRatio = "1:1", productContext = null) {
   try {
+    // Validate input prompt
+    if (!prompt || typeof prompt !== 'string' || prompt.trim().length === 0) {
+      throw new Error("Prompt cannot be empty");
+    }
+    
     // Enrich prompt with product context if provided
-    let enrichedPrompt = prompt;
+    let enrichedPrompt = prompt.trim();
     if (productContext) {
       const contextParts = [];
       if (productContext.title) {
@@ -54,10 +59,17 @@ export async function generateImage(prompt, aspectRatio = "1:1", productContext 
       contextParts.push("Brand: Marom");
       
       const contextLine = contextParts.join(". ");
-      enrichedPrompt = `${contextLine}. ${prompt}`;
+      enrichedPrompt = `${contextLine}. ${enrichedPrompt}`;
     }
     
-    console.log(`[Vertex] Generating image with Imagen 3: "${enrichedPrompt.substring(0, 50)}..."`);
+    // Limit prompt length
+    if (enrichedPrompt.length > 4000) {
+      console.warn(`[Vertex] Prompt is very long (${enrichedPrompt.length} chars), truncating to 4000`);
+      enrichedPrompt = enrichedPrompt.substring(0, 4000);
+    }
+    
+    console.log(`[Vertex] Generating image with Imagen 3: "${enrichedPrompt.substring(0, 100)}..."`);
+    console.log(`[Vertex] Prompt length: ${enrichedPrompt.length} characters`);
     
     // Map aspect ratio to Imagen format
     const aspectRatioMap = {
@@ -70,6 +82,8 @@ export async function generateImage(prompt, aspectRatio = "1:1", productContext 
     // Use Vertex AI Imagen 3 endpoint (REST API)
     const endpoint = `${VERTEX_API_BASE}/projects/${PROJECT_ID}/locations/${LOCATION}/publishers/google/models/imagegeneration@006:predict`;
     
+    // Build request body - Vertex AI Imagen API format
+    // Note: The API format may vary - try different structures if 400 error occurs
     const requestBody = {
       instances: [{
         prompt: enrichedPrompt
@@ -82,22 +96,67 @@ export async function generateImage(prompt, aspectRatio = "1:1", productContext 
       }
     };
     
+    // Log request for debugging
+    console.log(`[Vertex] Project: ${PROJECT_ID}, Location: ${LOCATION}`);
+    console.log(`[Vertex] Endpoint: ${endpoint}`);
+    console.log(`[Vertex] Request body preview:`, JSON.stringify({
+      instances: [{
+        prompt: enrichedPrompt.substring(0, 100) + "..."
+      }],
+      parameters: requestBody.parameters
+    }, null, 2));
+    
     // Get access token for Vertex AI
     const accessToken = await getAccessToken();
+    
+    console.log(`[Vertex] Full request endpoint: ${endpoint}`);
+    console.log(`[Vertex] Full request body:`, JSON.stringify(requestBody, null, 2));
     
     const response = await axios.post(endpoint, requestBody, {
       headers: {
         "Authorization": `Bearer ${accessToken}`,
         "Content-Type": "application/json"
       },
-      timeout: 120000 // 2 minutes for image generation
+      timeout: 120000, // 2 minutes for image generation
+      validateStatus: function (status) {
+        return status < 500; // Don't throw on 4xx errors, we'll handle them
+      }
     });
     
+    // Check for errors in response
+    if (response.status >= 400) {
+      console.error(`[Vertex] API returned error status: ${response.status}`);
+      console.error(`[Vertex] Error response:`, JSON.stringify(response.data, null, 2));
+      
+      const errorDetails = response.data?.error || response.data;
+      let errorMessage = `HTTP ${response.status}: ${response.statusText}`;
+      
+      if (errorDetails) {
+        if (typeof errorDetails === 'string') {
+          errorMessage = errorDetails;
+        } else if (errorDetails.message) {
+          errorMessage = errorDetails.message;
+        } else if (errorDetails.details) {
+          errorMessage = JSON.stringify(errorDetails.details);
+        } else {
+          errorMessage = JSON.stringify(errorDetails);
+        }
+      }
+      
+      throw new Error(`Vertex AI API error: ${errorMessage}`);
+    }
+    
     if (!response.data?.predictions || response.data.predictions.length === 0) {
-      throw new Error("No image generated from Imagen 3");
+      console.error("[Vertex] No predictions in response:", response.data);
+      throw new Error("No image generated from Imagen 3 - empty predictions array");
     }
     
     const imageBase64 = response.data.predictions[0].bytesBase64Encoded;
+    if (!imageBase64) {
+      console.error("[Vertex] No bytesBase64Encoded in prediction:", response.data.predictions[0]);
+      throw new Error("Image data not found in response - missing bytesBase64Encoded");
+    }
+    
     const imageBuffer = Buffer.from(imageBase64, "base64");
     
     console.log(`[Vertex] Image generated successfully (${imageBuffer.length} bytes)`);
@@ -108,7 +167,29 @@ export async function generateImage(prompt, aspectRatio = "1:1", productContext 
       model: "imagen-3"
     };
   } catch (err) {
-    console.error("[Vertex] Image generation error:", err.response?.data || err.message);
+    console.error("[Vertex] Image generation error:", err.message);
+    if (err.response) {
+      console.error("[Vertex] Response status:", err.response.status);
+      console.error("[Vertex] Response headers:", err.response.headers);
+      console.error("[Vertex] Response data:", JSON.stringify(err.response.data, null, 2));
+      
+      const errorDetails = err.response.data?.error || err.response.data;
+      let errorMessage = `HTTP ${err.response.status}: ${err.response.statusText}`;
+      
+      if (errorDetails) {
+        if (typeof errorDetails === 'string') {
+          errorMessage = errorDetails;
+        } else if (errorDetails.message) {
+          errorMessage = errorDetails.message;
+        } else if (errorDetails.details) {
+          errorMessage = JSON.stringify(errorDetails.details);
+        } else {
+          errorMessage = JSON.stringify(errorDetails);
+        }
+      }
+      
+      throw new Error(`Image generation failed: ${errorMessage}`);
+    }
     throw new Error(`Image generation failed: ${err.message}`);
   }
 }
