@@ -12,6 +12,38 @@ import {
 
 const router = express.Router();
 
+// Test route to verify router is working
+router.get("/test", (req, res) => {
+  res.json({ 
+    success: true, 
+    message: "Media API router is working",
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Middleware to require admin key (optional - can be added at route level)
+const requireAdminKey = (req, res, next) => {
+  const ADMIN_DASH_KEY = process.env.ADMIN_DASH_KEY;
+  const providedKey = req.headers["x-admin-key"];
+  
+  if (!ADMIN_DASH_KEY) {
+    // If no admin key is configured, allow all requests (for development)
+    console.log("[Media API] No ADMIN_DASH_KEY configured, allowing request");
+    return next();
+  }
+  
+  if (!providedKey || providedKey !== ADMIN_DASH_KEY) {
+    console.log("[Media API] Authentication failed: invalid or missing admin key");
+    return res.status(401).json({ 
+      success: false,
+      error: "Unauthorized. Missing or invalid x-admin-key header." 
+    });
+  }
+  
+  console.log("[Media API] Authentication successful");
+  next();
+};
+
 /**
  * POST /api/media/create
  * Create media (image/video) using Vertex AI with optional WooCommerce product integration
@@ -30,7 +62,7 @@ const router = express.Router();
  *   "sessionId"?: "string"
  * }
  */
-router.post("/create", async (req, res) => {
+router.post("/create", requireAdminKey, async (req, res) => {
   try {
     const { 
       mode, 
@@ -184,10 +216,13 @@ router.post("/create", async (req, res) => {
       res.send(result.buffer);
       
     } catch (err) {
-      console.error(`[Media API] Generation error (${mode}):`, err.message);
+      console.error(`[Media API] Generation error (${mode}):`, err);
+      console.error(`[Media API] Error stack:`, err.stack);
+      const errorMessage = err.response?.data?.error || err.message || "Media generation failed";
       return res.status(500).json({
         success: false,
-        error: err.message || "Media generation failed"
+        error: errorMessage,
+        details: process.env.NODE_ENV === 'development' ? err.stack : undefined
       });
     }
     
