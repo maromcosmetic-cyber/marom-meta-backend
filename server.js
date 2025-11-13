@@ -5069,29 +5069,59 @@ app.post("/api/creatives/video", requireAdminKey, async (req, res) => {
 // Mount new routes (optional - only if files exist)
 async function loadVertexRoutes() {
   try {
-    console.log("[Route Loading] Attempting to load routes/media.js...");
+    console.log("[Route Loading] Attempting to load media.js...");
     
-    // Check if file exists first
-    const mediaRoutePath = path.join(__dirname, "routes", "media.js");
-    if (!fs.existsSync(mediaRoutePath)) {
-      console.warn(`⚠️ routes/media.js not found at ${mediaRoutePath}`);
+    // Try root directory first (matches git structure), then routes/ subdirectory
+    let mediaRoutes = null;
+    const possibleMediaPaths = [
+      "./media.js",  // Root directory (matches git)
+      "./routes/media.js"  // Routes subdirectory (fallback)
+    ];
+    
+    for (const mediaPath of possibleMediaPaths) {
+      const mediaRoutePath = mediaPath.startsWith("./") 
+        ? path.join(__dirname, mediaPath.replace("./", ""))
+        : path.join(__dirname, mediaPath);
+      
+      if (fs.existsSync(mediaRoutePath)) {
+        try {
+          mediaRoutes = (await import(mediaPath)).default;
+          console.log(`[Route Loading] Loaded media routes from: ${mediaPath}`);
+          break;
+        } catch (e) {
+          console.warn(`[Route Loading] Failed to load from ${mediaPath}:`, e.message);
+        }
+      }
+    }
+    
+    if (!mediaRoutes) {
+      console.warn("⚠️ media.js not found in root or routes/ directory");
       console.warn("   Routes will be added directly in server.js");
       return false;
     }
     
-    const mediaRoutes = (await import("./routes/media.js")).default;
-    if (!mediaRoutes) {
-      console.error("❌ routes/media.js did not export a default router");
-      return false;
-    }
-    
-    console.log("[Route Loading] Attempting to load routes/whatsapp.js...");
-    const whatsappRoutePath = path.join(__dirname, "routes", "whatsapp.js");
+    // Try to load WhatsApp routes (optional)
+    console.log("[Route Loading] Attempting to load whatsapp.js...");
     let whatsappWebhookRoutes = null;
-    if (fs.existsSync(whatsappRoutePath)) {
-      whatsappWebhookRoutes = (await import("./routes/whatsapp.js")).default;
-    } else {
-      console.warn("⚠️ routes/whatsapp.js not found, skipping WhatsApp routes");
+    const possibleWhatsappPaths = [
+      "./whatsapp.js",  // Root directory (matches git)
+      "./routes/whatsapp.js"  // Routes subdirectory (fallback)
+    ];
+    
+    for (const whatsappPath of possibleWhatsappPaths) {
+      const whatsappRoutePath = whatsappPath.startsWith("./") 
+        ? path.join(__dirname, whatsappPath.replace("./", ""))
+        : path.join(__dirname, whatsappPath);
+      
+      if (fs.existsSync(whatsappRoutePath)) {
+        try {
+          whatsappWebhookRoutes = (await import(whatsappPath)).default;
+          console.log(`[Route Loading] Loaded WhatsApp routes from: ${whatsappPath}`);
+          break;
+        } catch (e) {
+          console.warn(`[Route Loading] Failed to load from ${whatsappPath}:`, e.message);
+        }
+      }
     }
     
     app.use("/api/media", mediaRoutes);
@@ -5110,7 +5140,7 @@ async function loadVertexRoutes() {
     console.error("❌ Error loading Vertex AI Content Creator routes:", err);
     console.error("   Error details:", err.message);
     console.error("   Stack:", err.stack);
-    console.warn("   Make sure routes/media.js and routes/whatsapp.js are deployed.");
+    console.warn("   Make sure media.js and whatsapp.js are deployed (in root or routes/ directory).");
     return false;
   }
 }
@@ -5460,18 +5490,25 @@ function addMediaRoutesDirectly() {
   app.post("/api/media/create", requireAdminKey, async (req, res) => {
     console.log("[Media API] Direct route handler called");
     try {
-      // Try multiple import paths
+      // Try multiple import paths (check root directory first, then services/)
       let generateImage;
       const possiblePaths = [
-        "./services/vertexService.js",
-        path.join(__dirname, "services", "vertexService.js"),
-        path.join(process.cwd(), "services", "vertexService.js")
+        "./vertexService.js",  // Root directory (matches git structure)
+        "./services/vertexService.js",  // Services subdirectory (if exists)
+        path.join(__dirname, "vertexService.js"),  // Root absolute path
+        path.join(__dirname, "services", "vertexService.js"),  // Services absolute path
+        path.join(process.cwd(), "vertexService.js"),  // Root from cwd
+        path.join(process.cwd(), "services", "vertexService.js")  // Services from cwd
       ];
       
       let importError = null;
       for (const importPath of possiblePaths) {
         try {
-          const vertexModule = await import(importPath.startsWith(".") ? importPath : `file://${importPath}`);
+          // For ES modules, use file:// protocol for absolute paths
+          const normalizedPath = importPath.startsWith(".") 
+            ? importPath 
+            : `file://${importPath}`;
+          const vertexModule = await import(normalizedPath);
           generateImage = vertexModule.generateImage;
           if (generateImage) {
             console.log(`[Media API] Successfully imported vertexService from: ${importPath}`);
@@ -5479,44 +5516,57 @@ function addMediaRoutesDirectly() {
           }
         } catch (err) {
           importError = err;
+          console.warn(`[Media API] Failed to import from ${importPath}:`, err.message);
           continue;
         }
       }
       
       if (!generateImage) {
-        // Check if file exists and list available files
-        const vertexServicePath = path.join(__dirname, "services", "vertexService.js");
-        const servicesDir = path.join(__dirname, "services");
-        const fileExists = fs.existsSync(vertexServicePath);
-        const dirExists = fs.existsSync(servicesDir);
+        // Check if file exists in both root and services directory
+        const rootPath = path.join(__dirname, "vertexService.js");
+        const servicesPath = path.join(__dirname, "services", "vertexService.js");
+        const rootExists = fs.existsSync(rootPath);
+        const servicesExists = fs.existsSync(servicesPath);
         
-        let availableFiles = [];
-        if (dirExists) {
+        // List files in root directory
+        let rootFiles = [];
+        try {
+          rootFiles = fs.readdirSync(__dirname).filter(f => f.endsWith('.js'));
+        } catch (e) {
+          rootFiles = [`Error reading directory: ${e.message}`];
+        }
+        
+        // List files in services directory if it exists
+        let servicesFiles = [];
+        const servicesDir = path.join(__dirname, "services");
+        if (fs.existsSync(servicesDir)) {
           try {
-            availableFiles = fs.readdirSync(servicesDir);
+            servicesFiles = fs.readdirSync(servicesDir);
           } catch (e) {
-            availableFiles = [`Error reading directory: ${e.message}`];
+            servicesFiles = [`Error reading directory: ${e.message}`];
           }
         }
         
         console.error(`[Media API] vertexService.js not found.`);
-        console.error(`  Path: ${vertexServicePath}`);
-        console.error(`  File exists: ${fileExists}`);
-        console.error(`  Directory exists: ${dirExists}`);
-        console.error(`  Available files in services/: ${availableFiles.join(", ")}`);
+        console.error(`  Root path: ${rootPath}, Exists: ${rootExists}`);
+        console.error(`  Services path: ${servicesPath}, Exists: ${servicesExists}`);
+        console.error(`  Available JS files in root: ${rootFiles.join(", ")}`);
+        console.error(`  Available files in services/: ${servicesFiles.join(", ")}`);
         console.error(`  Import error:`, importError?.message);
         console.error(`  __dirname: ${__dirname}`);
         console.error(`  process.cwd(): ${process.cwd()}`);
         
         return res.status(503).json({ 
           success: false, 
-          error: "Vertex AI service not available. Please ensure services/vertexService.js is deployed.",
+          error: "Vertex AI service not available. Please ensure vertexService.js is deployed (either in root or services/ directory).",
           details: importError?.message || "File not found",
           debug: {
-            filePath: vertexServicePath,
-            fileExists: fileExists,
-            dirExists: dirExists,
-            availableFiles: availableFiles,
+            rootPath: rootPath,
+            rootExists: rootExists,
+            servicesPath: servicesPath,
+            servicesExists: servicesExists,
+            rootFiles: rootFiles,
+            servicesFiles: servicesFiles,
             __dirname: __dirname,
             cwd: process.cwd()
           }
@@ -5537,7 +5587,15 @@ function addMediaRoutesDirectly() {
       let productContext = null;
       if (productId || productQuery) {
         try {
-          const { findProduct, getProductSummary, isWooCommerceConfigured } = await import("./services/wooService.js");
+          // Try both root and services directory for wooService
+          let wooModule;
+          try {
+            wooModule = await import("./wooService.js");
+          } catch (e) {
+            wooModule = await import("./services/wooService.js");
+          }
+          
+          const { findProduct, getProductSummary, isWooCommerceConfigured } = wooModule;
           if (isWooCommerceConfigured()) {
             const product = await findProduct(productId || productQuery);
             if (product) {
