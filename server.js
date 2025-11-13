@@ -5129,6 +5129,33 @@ async function loadVertexRoutes() {
       app.use("/webhooks/whatsapp", whatsappWebhookRoutes);
     }
     
+    // Load image generator routes
+    let imageGeneratorRoutes = null;
+    const possibleImageGeneratorPaths = [
+      "./routes/imageGenerator.js",
+      "./imageGenerator.js"
+    ];
+    
+    for (const routePath of possibleImageGeneratorPaths) {
+      try {
+        const routeModule = await import(routePath);
+        imageGeneratorRoutes = routeModule.default;
+        console.log(`[Route Loading] ✅ Loaded imageGenerator.js from ${routePath}`);
+        break;
+      } catch (e) {
+        // Continue to next path
+      }
+    }
+    
+    if (imageGeneratorRoutes) {
+      app.use("/api/image-generator", imageGeneratorRoutes);
+      console.log("✅ Image Generator routes loaded");
+      console.log("   - POST /api/image-generator/compose");
+      console.log("   - GET /api/image-generator/test");
+    } else {
+      console.warn("⚠️ Image Generator routes not found");
+    }
+    
     console.log("✅ Vertex AI Content Creator routes loaded");
     console.log("   - POST /api/media/create");
     console.log("   - GET /api/media/test");
