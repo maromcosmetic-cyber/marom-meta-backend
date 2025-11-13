@@ -5358,6 +5358,145 @@ app.get("/api/geocode/search", async (req, res) => {
   }
 });
 
+// Vertex AI Diagnostic Endpoint
+app.get("/api/vertex/diagnostic", requireAdminKey, async (req, res) => {
+  const diagnostic = {
+    timestamp: new Date().toISOString(),
+    environment: {},
+    credentials: {},
+    authentication: {},
+    api: {}
+  };
+  
+  try {
+    // Check environment variables
+    diagnostic.environment = {
+      GOOGLE_CLOUD_PROJECT: process.env.GOOGLE_CLOUD_PROJECT ? "✓ SET" : "✗ NOT SET",
+      GOOGLE_CLOUD_LOCATION: process.env.GOOGLE_CLOUD_LOCATION || "us-central1 (default)",
+      GOOGLE_APPLICATION_CREDENTIALS: process.env.GOOGLE_APPLICATION_CREDENTIALS ? "✓ SET" : "✗ NOT SET",
+      GOOGLE_PRIVATE_KEY: process.env.GOOGLE_PRIVATE_KEY ? "✓ SET" : "✗ NOT SET",
+      GOOGLE_CLIENT_EMAIL: process.env.GOOGLE_CLIENT_EMAIL ? "✓ SET" : "✗ NOT SET"
+    };
+    
+    // Check credentials file
+    if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+      const credsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+      const fileExists = fs.existsSync(credsPath);
+      let readable = "N/A";
+      if (fileExists) {
+        try {
+          fs.accessSync(credsPath, fs.constants.R_OK);
+          readable = "✓ READABLE";
+        } catch {
+          readable = "✗ NOT READABLE";
+        }
+      }
+      
+      diagnostic.credentials = {
+        filePath: credsPath,
+        fileExists: fileExists ? "✓ EXISTS" : "✗ NOT FOUND",
+        readable: readable
+      };
+      
+      if (fileExists) {
+        try {
+          const credsContent = fs.readFileSync(credsPath, "utf8");
+          const creds = JSON.parse(credsContent);
+          diagnostic.credentials.projectId = creds.project_id || "NOT FOUND";
+          diagnostic.credentials.clientEmail = creds.client_email || "NOT FOUND";
+          diagnostic.credentials.hasPrivateKey = creds.private_key ? "✓ PRESENT" : "✗ MISSING";
+        } catch (err) {
+          diagnostic.credentials.parseError = err.message;
+        }
+      }
+    }
+    
+    // Test authentication
+    try {
+      const { GoogleAuth } = await import("google-auth-library");
+      const authConfig = {
+        scopes: ["https://www.googleapis.com/auth/cloud-platform"]
+      };
+      
+      if (process.env.GOOGLE_APPLICATION_CREDENTIALS && fs.existsSync(process.env.GOOGLE_APPLICATION_CREDENTIALS)) {
+        authConfig.keyFilename = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+      } else if (process.env.GOOGLE_PRIVATE_KEY && process.env.GOOGLE_CLIENT_EMAIL) {
+        authConfig.credentials = {
+          type: "service_account",
+          project_id: process.env.GOOGLE_CLOUD_PROJECT,
+          private_key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n"),
+          client_email: process.env.GOOGLE_CLIENT_EMAIL
+        };
+      }
+      
+      const auth = new GoogleAuth(authConfig);
+      const client = await auth.getClient();
+      const accessToken = await client.getAccessToken();
+      
+      diagnostic.authentication = {
+        status: "✓ SUCCESS",
+        tokenPreview: accessToken.token ? `${accessToken.token.substring(0, 20)}...` : "NO TOKEN"
+      };
+      
+      // Test API endpoint
+      const projectId = process.env.GOOGLE_CLOUD_PROJECT;
+      const location = process.env.GOOGLE_CLOUD_LOCATION || "us-central1";
+      const testEndpoint = `https://${location}-aiplatform.googleapis.com/v1/projects/${projectId}/locations/${location}`;
+      
+      try {
+        const response = await axios.get(testEndpoint, {
+          headers: {
+            "Authorization": `Bearer ${accessToken.token}`,
+            "Content-Type": "application/json"
+          },
+          timeout: 10000
+        });
+        
+        diagnostic.api = {
+          status: "✓ ACCESSIBLE",
+          endpoint: testEndpoint,
+          httpStatus: response.status
+        };
+      } catch (apiErr) {
+        diagnostic.api = {
+          status: "✗ FAILED",
+          endpoint: testEndpoint,
+          error: apiErr.response ? `${apiErr.response.status} ${apiErr.response.statusText}` : apiErr.message,
+          details: apiErr.response?.data || null,
+          suggestions: []
+        };
+        
+        if (apiErr.response?.status === 403) {
+          diagnostic.api.suggestions = [
+            "Vertex AI API may not be enabled in Google Cloud Console",
+            "Service account may not have 'Vertex AI User' role",
+            "Project billing may not be enabled"
+          ];
+        } else if (apiErr.response?.status === 404) {
+          diagnostic.api.suggestions = [
+            "Project ID may be incorrect",
+            "Location/region may be incorrect",
+            "Vertex AI API may not be enabled"
+          ];
+        }
+      }
+    } catch (authErr) {
+      diagnostic.authentication = {
+        status: "✗ FAILED",
+        error: authErr.message,
+        stack: authErr.stack
+      };
+    }
+    
+    res.json(diagnostic);
+  } catch (err) {
+    res.status(500).json({
+      error: err.message,
+      diagnostic: diagnostic
+    });
+  }
+});
+
 // Load routes before starting server
 await loadVertexRoutes();
 
