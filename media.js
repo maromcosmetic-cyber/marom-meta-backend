@@ -1,6 +1,35 @@
 import express from "express";
-import { generateImage, editImage, generateVideo } from "../services/vertexService.js";
-import { 
+
+// Helper function to import with fallback paths
+async function importWithFallback(moduleName, paths) {
+  for (const modulePath of paths) {
+    try {
+      return await import(modulePath);
+    } catch (e) {
+      continue;
+    }
+  }
+  throw new Error(`Could not import ${moduleName} from any path: ${paths.join(", ")}`);
+}
+
+// Import vertexService - try root first (matches git structure), then services/
+// Note: If this file is in routes/, use ../ to go up. If in root, use ./
+const vertexModule = await importWithFallback("vertexService", [
+  "../vertexService.js",  // If in routes/ subdirectory
+  "./vertexService.js",   // If in root directory
+  "../services/vertexService.js",  // If in routes/ and services/ exists
+  "./services/vertexService.js"   // If in root and services/ exists
+]);
+const { generateImage, editImage, generateVideo } = vertexModule;
+
+// Import wooService - try root first, then services/
+const wooModule = await importWithFallback("wooService", [
+  "../wooService.js",  // If in routes/ subdirectory
+  "./wooService.js",  // If in root directory
+  "../services/wooService.js",  // If in routes/ and services/ exists
+  "./services/wooService.js"   // If in root and services/ exists
+]);
+const { 
   getProductById, 
   searchProductsByText, 
   getProductPrimaryImage, 
@@ -8,7 +37,7 @@ import {
   getProductSummary,
   findProduct,
   isWooCommerceConfigured
-} from "../services/wooService.js";
+} = wooModule;
 
 const router = express.Router();
 
