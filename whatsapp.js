@@ -133,6 +133,23 @@ router.get("/", (req, res) => {
   }
 });
 
+/**
+ * GET /webhooks/whatsapp/test
+ * Test endpoint to verify WhatsApp routes are working
+ */
+router.get("/test", (req, res) => {
+  res.status(200).json({
+    success: true,
+    message: "WhatsApp webhook routes are working",
+    timestamp: new Date().toISOString(),
+    routes: {
+      "POST /webhooks/whatsapp": "Handle incoming WhatsApp messages",
+      "GET /webhooks/whatsapp": "Webhook verification",
+      "GET /webhooks/whatsapp/test": "Test endpoint"
+    }
+  });
+});
+
 // Store generated media for each user (for campaign use)
 const generatedMediaStore = new Map(); // phone -> [{mediaId, buffer, mimeType, prompt, timestamp}]
 
