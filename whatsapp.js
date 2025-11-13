@@ -1,6 +1,66 @@
 import express from "express";
 import axios from "axios";
-import { generateImage, editImage, generateVideo } from "../services/vertexService.js";
+import path from "path";
+import { fileURLToPath } from "url";
+import fs from "fs";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Helper function to import vertexService with fallback paths
+async function importVertexService() {
+  const vertexPaths = [
+    "../services/vertexService.js",
+    "./services/vertexService.js",
+    path.join(__dirname, "../services/vertexService.js"),
+    path.join(__dirname, "../../services/vertexService.js"),
+    path.join(process.cwd(), "services/vertexService.js")
+  ];
+
+  for (const vertexPath of vertexPaths) {
+    try {
+      // Check if file exists first
+      const checkPath = vertexPath.startsWith(".") 
+        ? path.resolve(__dirname, vertexPath)
+        : vertexPath;
+      
+      if (fs.existsSync(checkPath)) {
+        const normalizedPath = vertexPath.startsWith(".") 
+          ? vertexPath 
+          : `file://${vertexPath}`;
+        const vertexService = await import(normalizedPath);
+        if (vertexService.generateImage) {
+          console.log(`[WhatsApp Routes] Loaded vertexService from: ${vertexPath}`);
+          return vertexService;
+        }
+      }
+    } catch (err) {
+      continue;
+    }
+  }
+  
+  console.warn("[WhatsApp Routes] vertexService not found, image/video generation will be disabled");
+  return { generateImage: null, editImage: null, generateVideo: null };
+}
+
+// Import vertexService (will be resolved when needed)
+let vertexServiceModule = null;
+const vertexServicePromise = importVertexService().then(module => {
+  vertexServiceModule = module;
+  return module;
+});
+
+// Lazy getters for vertexService functions
+function getGenerateImage() {
+  return vertexServiceModule?.generateImage || null;
+}
+function getEditImage() {
+  return vertexServiceModule?.editImage || null;
+}
+function getGenerateVideo() {
+  return vertexServiceModule?.generateVideo || null;
+}
+
 import { uploadWhatsAppMedia, sendWhatsAppImage, sendWhatsAppVideo, sendWhatsAppText } from "../services/whatsappService.js";
 import { findProduct, getProductSummary, getProductPrimaryImage, getProductGallery, isWooCommerceConfigured } from "../services/wooService.js";
 
@@ -170,6 +230,12 @@ async function handleIncomingMessage(message, contact) {
     // Generate media based on command with product context
     switch (command.mode) {
       case "image":
+        // Ensure vertexService is loaded
+        await vertexServicePromise;
+        const generateImage = getGenerateImage();
+        if (!generateImage) {
+          throw new Error("Image generation not available. vertexService.js not found.");
+        }
         result = await generateImage(command.prompt, command.aspectRatio || "1:1", productContext);
         break;
         
@@ -178,10 +244,22 @@ async function handleIncomingMessage(message, contact) {
           await sendWhatsAppText(from, "❌ I need an image URL to edit. Please provide: edit: <instruction> | url=<image_url> or | product=<id>");
           return false;
         }
+        // Ensure vertexService is loaded
+        await vertexServicePromise;
+        const editImage = getEditImage();
+        if (!editImage) {
+          throw new Error("Image editing not available. vertexService.js not found.");
+        }
         result = await editImage(command.prompt, selectedImageUrl, command.maskPngUrl);
         break;
         
       case "video":
+        // Ensure vertexService is loaded
+        await vertexServicePromise;
+        const generateVideo = getGenerateVideo();
+        if (!generateVideo) {
+          throw new Error("Video generation not available. vertexService.js not found.");
+        }
         result = await generateVideo(command.prompt, command.aspectRatio || "16:9", command.durationSec || 8, productContext);
         break;
         
