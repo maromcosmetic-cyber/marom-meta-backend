@@ -247,8 +247,34 @@ router.post("/create", requireAdminKey, async (req, res) => {
     } catch (err) {
       console.error(`[Media API] Generation error (${mode}):`, err);
       console.error(`[Media API] Error stack:`, err.stack);
-      const errorMessage = err.response?.data?.error || err.message || "Media generation failed";
-      return res.status(500).json({
+      
+      // Extract detailed error message
+      let errorMessage = err.message || "Media generation failed";
+      if (err.response?.data) {
+        console.error(`[Media API] Vertex AI error response:`, JSON.stringify(err.response.data, null, 2));
+        const vertexError = err.response.data.error || err.response.data;
+        if (typeof vertexError === 'string') {
+          errorMessage = vertexError;
+        } else if (vertexError?.message) {
+          errorMessage = vertexError.message;
+        } else if (vertexError?.details) {
+          errorMessage = JSON.stringify(vertexError.details);
+        }
+      }
+      
+      // Determine status code
+      let statusCode = 500;
+      if (err.message?.includes('400') || err.message?.includes('Bad Request')) {
+        statusCode = 400;
+      } else if (err.message?.includes('401') || err.message?.includes('Unauthorized')) {
+        statusCode = 401;
+      } else if (err.message?.includes('403') || err.message?.includes('Forbidden')) {
+        statusCode = 403;
+      } else if (err.message?.includes('404') || err.message?.includes('Not Found')) {
+        statusCode = 404;
+      }
+      
+      return res.status(statusCode).json({
         success: false,
         error: errorMessage,
         details: process.env.NODE_ENV === 'development' ? err.stack : undefined
