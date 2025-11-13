@@ -5484,15 +5484,42 @@ function addMediaRoutesDirectly() {
       }
       
       if (!generateImage) {
-        // Check if file exists
+        // Check if file exists and list available files
         const vertexServicePath = path.join(__dirname, "services", "vertexService.js");
+        const servicesDir = path.join(__dirname, "services");
         const fileExists = fs.existsSync(vertexServicePath);
-        console.error(`[Media API] vertexService.js not found. Path: ${vertexServicePath}, Exists: ${fileExists}`);
-        console.error(`[Media API] Import error:`, importError?.message);
+        const dirExists = fs.existsSync(servicesDir);
+        
+        let availableFiles = [];
+        if (dirExists) {
+          try {
+            availableFiles = fs.readdirSync(servicesDir);
+          } catch (e) {
+            availableFiles = [`Error reading directory: ${e.message}`];
+          }
+        }
+        
+        console.error(`[Media API] vertexService.js not found.`);
+        console.error(`  Path: ${vertexServicePath}`);
+        console.error(`  File exists: ${fileExists}`);
+        console.error(`  Directory exists: ${dirExists}`);
+        console.error(`  Available files in services/: ${availableFiles.join(", ")}`);
+        console.error(`  Import error:`, importError?.message);
+        console.error(`  __dirname: ${__dirname}`);
+        console.error(`  process.cwd(): ${process.cwd()}`);
+        
         return res.status(503).json({ 
           success: false, 
           error: "Vertex AI service not available. Please ensure services/vertexService.js is deployed.",
-          details: importError?.message || "File not found"
+          details: importError?.message || "File not found",
+          debug: {
+            filePath: vertexServicePath,
+            fileExists: fileExists,
+            dirExists: dirExists,
+            availableFiles: availableFiles,
+            __dirname: __dirname,
+            cwd: process.cwd()
+          }
         });
       }
       
