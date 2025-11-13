@@ -5440,7 +5440,36 @@ app.get("/api/vertex/diagnostic", requireAdminKey, async (req, res) => {
       
       // Test API endpoint
       const projectId = process.env.GOOGLE_CLOUD_PROJECT;
-      const location = process.env.GOOGLE_CLOUD_LOCATION || "us-central1";
+      let location = (process.env.GOOGLE_CLOUD_LOCATION || "us-central1").trim().toLowerCase();
+      
+      // Validate location - Vertex AI doesn't support "global"
+      const VALID_LOCATIONS = [
+        "us-central1", "us-east1", "us-east4", "us-west1", "us-west2", "us-west3", "us-west4",
+        "europe-west1", "europe-west2", "europe-west3", "europe-west4", "europe-west6", "europe-west8", "europe-west9",
+        "asia-east1", "asia-northeast1", "asia-northeast2", "asia-northeast3", "asia-south1", "asia-southeast1",
+        "australia-southeast1", "northamerica-northeast1", "southamerica-east1"
+      ];
+      
+      if (location === "global" || !VALID_LOCATIONS.includes(location)) {
+        diagnostic.api = {
+          status: "✗ FAILED",
+          endpoint: `https://${location}-aiplatform.googleapis.com/v1/projects/${projectId}/locations/${location}`,
+          error: "Invalid location: 'global' is not supported",
+          details: {
+            providedLocation: location,
+            validLocations: VALID_LOCATIONS,
+            suggestion: "Set GOOGLE_CLOUD_LOCATION to a valid region like 'us-central1', 'us-east1', 'europe-west1', or 'asia-southeast1'"
+          },
+          suggestions: [
+            "Location 'global' is not valid for Vertex AI",
+            "Set GOOGLE_CLOUD_LOCATION to a specific region (e.g., us-central1, us-east1, europe-west1, asia-southeast1)",
+            "Common regions: us-central1 (US), europe-west1 (EU), asia-southeast1 (Asia)"
+          ]
+        };
+        res.json(diagnostic);
+        return;
+      }
+      
       const testEndpoint = `https://${location}-aiplatform.googleapis.com/v1/projects/${projectId}/locations/${location}`;
       
       try {
