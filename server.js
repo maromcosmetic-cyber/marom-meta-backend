@@ -5074,8 +5074,12 @@ async function loadVertexRoutes() {
     app.use("/api/media", mediaRoutes);
     app.use("/webhooks/whatsapp", whatsappWebhookRoutes);
     console.log("✅ Vertex AI Content Creator routes loaded");
+    console.log("   - POST /api/media/create");
+    console.log("   - POST /webhooks/whatsapp");
   } catch (err) {
-    console.warn("⚠️  Vertex AI Content Creator routes not found. Skipping...");
+    console.error("❌ Error loading Vertex AI Content Creator routes:", err);
+    console.error("   Error details:", err.message);
+    console.error("   Stack:", err.stack);
     console.warn("   Make sure routes/media.js and routes/whatsapp.js are deployed.");
   }
 }
