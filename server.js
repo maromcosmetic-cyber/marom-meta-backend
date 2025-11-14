@@ -5214,6 +5214,78 @@ app.post("/api/company/context", (req, res) => {
   }
 });
 
+// AI Enhancement endpoint for company profile
+app.post("/api/company/enhance-with-ai", async (req, res) => {
+  try {
+    const { scrapedData } = req.body;
+    
+    if (!scrapedData) {
+      return res.status(400).json({ error: "scrapedData is required" });
+    }
+    
+    // Build prompt for AI enhancement
+    const enhancementPrompt = `You are a brand strategist and copywriter. Based on the following scraped website data, create a comprehensive and compelling company profile. Fill in all fields with professional, engaging content that reflects the brand's identity.
+
+Scraped Data:
+- Title: ${scrapedData.title || 'Not provided'}
+- Description: ${scrapedData.description || 'Not provided'}
+- Main Content: ${scrapedData.mainContent ? scrapedData.mainContent.substring(0, 1000) : 'Not provided'}
+- Headings: ${scrapedData.headings ? scrapedData.headings.join(', ') : 'Not provided'}
+- Colors: ${scrapedData.colors ? JSON.stringify(scrapedData.colors) : 'Not provided'}
+- Fonts: ${scrapedData.fonts ? JSON.stringify(scrapedData.fonts) : 'Not provided'}
+
+Please provide a complete company profile in JSON format with the following fields:
+{
+  "name": "Brand name (extracted from title or inferred)",
+  "tagline": "Compelling tagline (1 sentence)",
+  "description": "Brand description (2-3 sentences, engaging)",
+  "mission": "Mission statement (1-2 sentences, inspiring)",
+  "brandTone": "Brand tone (e.g., 'authentic, warm, natural, trustworthy')",
+  "audience": "Target audience description (detailed, specific demographics and psychographics)",
+  "brandValues": "Brand values (comma-separated list, e.g., 'Natural ingredients, Sustainability, Quality, Transparency')",
+  "brandUSP": "Unique selling proposition (what makes this brand unique, 2-3 sentences)",
+  "brandMessages": "Key brand messages (bullet points separated by •)",
+  "brandPersonality": "Brand personality traits (comma-separated, e.g., 'Authentic, Caring, Transparent, Nature-focused')",
+  "imageStylePreferences": "Visual style preferences (detailed description of image style, lighting, composition, colors, etc.)",
+  "contentThemes": "Content themes (comma-separated themes for content creation)"
+}
+
+Make sure all fields are filled with high-quality, professional content that would be suitable for AI-powered marketing and content generation.`;
+
+    const completion = await openaiWithFallback({
+      model: "gpt-4o-mini",
+      messages: [
+        {
+          role: "system",
+          content: "You are an expert brand strategist and copywriter. You create compelling, professional brand profiles that help AI systems generate better marketing content. Always respond with valid JSON only."
+        },
+        {
+          role: "user",
+          content: enhancementPrompt
+        }
+      ],
+      response_format: { type: "json_object" },
+      temperature: 0.7,
+      max_tokens: 2000
+    });
+    
+    const enhancedData = JSON.parse(completion.choices[0].message.content);
+    
+    // Merge with scraped data (keep colors and fonts from scraping)
+    const finalData = {
+      ...enhancedData,
+      // Keep scraped colors and fonts if available
+      colors: scrapedData.colors || enhancedData.colors,
+      fonts: scrapedData.fonts || enhancedData.fonts
+    };
+    
+    res.json({ success: true, data: finalData });
+  } catch (err) {
+    console.error("[AI Enhancement] Error:", err.message);
+    res.status(500).json({ error: err.message || "Failed to enhance company profile with AI" });
+  }
+});
+
 // Generate audience suggestions
 app.post("/api/ai/audience", async (req, res) => {
   try {
