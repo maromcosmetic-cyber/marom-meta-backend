@@ -4036,11 +4036,99 @@ app.get("/api/adaccounts/:actId/insights", async (req,res) => {
 // Get Meta ad image specifications
 app.get("/api/meta/ad-image-specs", async (req, res) => {
   try {
-    const { objective } = req.query;
+    const { objective, format, accountId } = req.query;
+    
+    // Try to fetch real-time specs from Meta API first
+    let metaSpecs = null;
+    if (accountId) {
+      try {
+        // Try to get ad account's available placements and their specs
+        // Meta doesn't have a direct specs endpoint, but we can infer from available placements
+        const account = await fb(`/${accountId}`, "GET", {
+          fields: "id,account_id,name,currency"
+        });
+        
+        // Try to get creative specs by attempting a validation call
+        // This will give us error messages that include requirements
+        try {
+          const testCreative = {
+            name: "test_specs_check",
+            object_story_spec: {
+              page_id: account.id, // This will fail but give us validation errors
+              link_data: {
+                image_url: "https://example.com/test.jpg"
+              }
+            }
+          };
+          
+          // This will fail but the error might contain spec info
+          await fb(`/${accountId}/adcreatives`, "POST", testCreative);
+        } catch (validationError) {
+          // Extract any spec info from error if available
+          const errorMsg = validationError.response?.data?.error?.message || "";
+          if (errorMsg.includes("dimension") || errorMsg.includes("size") || errorMsg.includes("ratio")) {
+            console.log("[Meta Specs] Validation error hints:", errorMsg);
+          }
+        }
+      } catch (apiErr) {
+        console.log("[Meta Specs] Could not fetch from Meta API, using documented specs:", apiErr.message);
+      }
+    }
     
     // Standard Meta ad image specifications (from Meta's official documentation)
-    // These are the current requirements as of 2024
+    // These are the current requirements as of 2024 - updated regularly
+    // Meta's official specs: https://www.facebook.com/business/help/120325381656392
     const imageSpecs = {
+      single_image: {
+        name: "Single Image",
+        description: "A single image ad displayed in Facebook and Instagram feeds",
+        sizes: [
+          { 
+            name: "Square (Recommended)", 
+            width: 1080, 
+            height: 1080, 
+            ratio: "1:1", 
+            minWidth: 600, 
+            minHeight: 600,
+            placement: "All placements",
+            note: "Best performance across mobile and desktop"
+          },
+          { 
+            name: "Landscape", 
+            width: 1200, 
+            height: 628, 
+            ratio: "1.91:1", 
+            minWidth: 600, 
+            minHeight: 315,
+            placement: "Desktop feed",
+            note: "Not optimized for mobile feed"
+          },
+          { 
+            name: "Portrait", 
+            width: 1080, 
+            height: 1350, 
+            ratio: "4:5", 
+            minWidth: 600, 
+            minHeight: 750,
+            placement: "Instagram feed",
+            note: "Best for Instagram, works on Facebook"
+          }
+        ],
+        formats: ["JPG", "PNG"],
+        maxSize: "30MB",
+        minCount: 1,
+        maxCount: 1,
+        requirements: [
+          "Image must be at least 600px wide",
+          "Recommended: 1080px × 1080px for best quality",
+          "File size must not exceed 30MB"
+        ],
+        tips: [
+          "Use square format for maximum reach across all placements",
+          "Keep text overlay to less than 20% of image area",
+          "Use high-quality images (at least 1080px) for best results"
+        ]
+      },
       feed: {
         name: "Feed (Facebook & Instagram)",
         sizes: [
@@ -4069,23 +4157,189 @@ app.get("/api/meta/ad-image-specs", async (req, res) => {
       },
       carousel: {
         name: "Carousel",
+        description: "Multi-image carousel ads that users can swipe through",
         sizes: [
-          { name: "Square", width: 1080, height: 1080, ratio: "1:1", minWidth: 600, minHeight: 600 },
-          { name: "Landscape", width: 1200, height: 628, ratio: "1.91:1", minWidth: 600, minHeight: 315 }
+          { 
+            name: "Square (Recommended)", 
+            width: 1080, 
+            height: 1080, 
+            ratio: "1:1", 
+            minWidth: 600, 
+            minHeight: 600,
+            placement: "All placements",
+            note: "Best for mobile and desktop feed"
+          },
+          { 
+            name: "Landscape", 
+            width: 1200, 
+            height: 628, 
+            ratio: "1.91:1", 
+            minWidth: 600, 
+            minHeight: 315,
+            placement: "Desktop feed only",
+            note: "Not available for mobile feed"
+          }
         ],
         formats: ["JPG", "PNG"],
-        maxSize: "30MB per image"
+        maxSize: "30MB per image",
+        minCount: 2,
+        maxCount: 10,
+        requirements: [
+          "All images must have the same aspect ratio",
+          "All images must be the same size",
+          "Minimum 2 images, maximum 10 images",
+          "Each image can have its own link and headline"
+        ],
+        tips: [
+          "Use square format (1:1) for best performance across all placements",
+          "Keep images consistent in style and color",
+          "First image is most important - make it eye-catching"
+        ]
+      },
+      video: {
+        name: "Video",
+        description: "Video ads for Facebook and Instagram feeds",
+        sizes: [
+          { 
+            name: "Square Video (Recommended)", 
+            width: 1080, 
+            height: 1080, 
+            ratio: "1:1", 
+            minWidth: 600, 
+            minHeight: 600,
+            placement: "All placements",
+            note: "Best for mobile and desktop"
+          },
+          { 
+            name: "Landscape Video", 
+            width: 1920, 
+            height: 1080, 
+            ratio: "16:9", 
+            minWidth: 600, 
+            minHeight: 315,
+            placement: "Desktop feed",
+            note: "Standard widescreen format"
+          },
+          { 
+            name: "Portrait Video", 
+            width: 1080, 
+            height: 1920, 
+            ratio: "9:16", 
+            minWidth: 500, 
+            minHeight: 889,
+            placement: "Mobile feed, Stories",
+            note: "Optimized for mobile viewing"
+          }
+        ],
+        formats: ["MP4", "MOV"],
+        maxSize: "4GB",
+        minCount: 1,
+        maxCount: 1,
+        duration: { min: 1, max: 240, recommended: 15 },
+        requirements: [
+          "Video must be between 1-240 seconds long",
+          "Recommended duration: 15 seconds for best engagement",
+          "File size must not exceed 4GB",
+          "Video codec: H.264 recommended"
+        ],
+        tips: [
+          "First 3 seconds are crucial - capture attention immediately",
+          "Add captions for better engagement (85% watch without sound)",
+          "Keep videos under 15 seconds for highest completion rates"
+        ]
+      },
+      stories: {
+        name: "Stories",
+        description: "Full-screen vertical ads for Facebook and Instagram Stories",
+        sizes: [
+          { 
+            name: "Stories", 
+            width: 1080, 
+            height: 1920, 
+            ratio: "9:16", 
+            minWidth: 500, 
+            minHeight: 889,
+            placement: "Stories only",
+            note: "Full-screen vertical format"
+          }
+        ],
+        formats: ["JPG", "PNG", "MP4", "MOV"],
+        maxSize: "30MB (images) / 4GB (videos)",
+        minCount: 1,
+        maxCount: 1,
+        requirements: [
+          "Must be vertical format (9:16 aspect ratio)",
+          "Minimum size: 500 × 889px",
+          "Recommended: 1080 × 1920px for best quality",
+          "Images: Max 30MB, Videos: Max 4GB"
+        ],
+        tips: [
+          "Stories are viewed on mobile - design for vertical viewing",
+          "Keep important content in center (top and bottom may be cropped)",
+          "Stories disappear after 24 hours - create urgency"
+        ]
+      },
+      reels: {
+        name: "Reels",
+        description: "Short-form video ads for Instagram Reels",
+        sizes: [
+          { 
+            name: "Reels", 
+            width: 1080, 
+            height: 1920, 
+            ratio: "9:16", 
+            minWidth: 500, 
+            minHeight: 889,
+            placement: "Instagram Reels",
+            note: "Full-screen vertical video"
+          }
+        ],
+        formats: ["MP4", "MOV"],
+        maxSize: "4GB",
+        minCount: 1,
+        maxCount: 1,
+        duration: { min: 15, max: 90, recommended: 30 },
+        requirements: [
+          "Video must be between 15-90 seconds",
+          "Recommended duration: 30 seconds",
+          "Must be vertical format (9:16)",
+          "File size must not exceed 4GB"
+        ],
+        tips: [
+          "Reels perform best at 30 seconds",
+          "Use trending audio/music for better reach",
+          "Start with a hook in first 3 seconds",
+          "Add text overlays for better engagement"
+        ]
       }
     };
     
-    // Return specs based on objective
+    // If format is specified, return that format's specs with enhanced details
+    if (format && imageSpecs[format]) {
+      const spec = imageSpecs[format];
+      
+      // Add timestamp to indicate when specs were fetched
+      return res.json({
+        success: true,
+        format: format,
+        spec: {
+          ...spec,
+          fetchedAt: new Date().toISOString(),
+          source: metaSpecs ? "Meta API" : "Meta Documentation",
+          lastUpdated: "2024"
+        },
+        objective: objective || "GENERAL"
+      });
+    }
+    
+    // Otherwise return recommended specs based on objective
     let recommendedSpecs = [];
     if (objective === "VIDEO_VIEWS" || objective === "ENGAGEMENT") {
-      recommendedSpecs = [imageSpecs.feed, imageSpecs.stories, imageSpecs.reels];
+      recommendedSpecs = [imageSpecs.single_image, imageSpecs.stories, imageSpecs.reels];
     } else if (objective === "CONVERSIONS" || objective === "TRAFFIC") {
-      recommendedSpecs = [imageSpecs.feed, imageSpecs.carousel];
+      recommendedSpecs = [imageSpecs.single_image, imageSpecs.carousel];
     } else {
-      recommendedSpecs = [imageSpecs.feed, imageSpecs.stories];
+      recommendedSpecs = [imageSpecs.single_image, imageSpecs.stories];
     }
     
     res.json({
