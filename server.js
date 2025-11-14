@@ -389,6 +389,101 @@ async function scrapeWebsite(url) {
       headings.push(match[1].replace(/<[^>]*>/g, '').trim());
     }
     
+    // Extract colors from CSS
+    const colors = {
+      primary: null,
+      secondary: null,
+      accent: null
+    };
+    
+    // Look for CSS variables (--primary-color, --brand-color, etc.)
+    const cssVarMatches = html.matchAll(/--(?:primary|brand|main|color)[-_]?color:\s*([^;]+);/gi);
+    const cssVars = Array.from(cssVarMatches).map(m => m[1].trim());
+    if (cssVars.length > 0) {
+      colors.primary = cssVars[0];
+    }
+    
+    // Look for common color patterns in style tags and inline styles
+    const colorPatterns = [
+      /(?:primary|brand|main)[-_]?color['":\s]*[:=]\s*['"]?([#][0-9A-Fa-f]{6}|[#][0-9A-Fa-f]{3}|rgb\([^)]+\)|rgba\([^)]+\))/gi,
+      /background[-_]?color:\s*([#][0-9A-Fa-f]{6}|[#][0-9A-Fa-f]{3}|rgb\([^)]+\)|rgba\([^)]+\))/gi,
+      /color:\s*([#][0-9A-Fa-f]{6}|[#][0-9A-Fa-f]{3}|rgb\([^)]+\)|rgba\([^)]+\))/gi
+    ];
+    
+    const foundColors = [];
+    colorPatterns.forEach(pattern => {
+      const matches = html.matchAll(pattern);
+      for (const match of matches) {
+        let color = match[1].trim();
+        // Convert rgb/rgba to hex if needed
+        if (color.startsWith('rgb')) {
+          const rgbMatch = color.match(/\d+/g);
+          if (rgbMatch && rgbMatch.length >= 3) {
+            const r = parseInt(rgbMatch[0]);
+            const g = parseInt(rgbMatch[1]);
+            const b = parseInt(rgbMatch[2]);
+            color = `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
+          }
+        }
+        // Normalize 3-digit hex to 6-digit
+        if (color.match(/^#[0-9A-Fa-f]{3}$/)) {
+          color = `#${color[1]}${color[1]}${color[2]}${color[2]}${color[3]}${color[3]}`;
+        }
+        if (color.match(/^#[0-9A-Fa-f]{6}$/i) && !foundColors.includes(color.toUpperCase())) {
+          foundColors.push(color.toUpperCase());
+        }
+      }
+    });
+    
+    // Assign colors (most common = primary, second = secondary, third = accent)
+    if (foundColors.length > 0) {
+      colors.primary = foundColors[0];
+      if (foundColors.length > 1) colors.secondary = foundColors[1];
+      if (foundColors.length > 2) colors.accent = foundColors[2];
+    }
+    
+    // Extract fonts from CSS
+    const fonts = {
+      primary: null,
+      secondary: null
+    };
+    
+    // Look for font-family in CSS
+    const fontPatterns = [
+      /font[-_]?family:\s*['"]?([^;'"]+)['"]?/gi,
+      /--(?:primary|main|body)[-_]?font:\s*['"]?([^;'"]+)['"]?/gi,
+      /--font[-_]?family:\s*['"]?([^;'"]+)['"]?/gi
+    ];
+    
+    const foundFonts = [];
+    fontPatterns.forEach(pattern => {
+      const matches = html.matchAll(pattern);
+      for (const match of matches) {
+        let font = match[1].trim();
+        // Extract first font from font stack (before comma)
+        font = font.split(',')[0].trim();
+        // Remove quotes
+        font = font.replace(/['"]/g, '');
+        // Common font names
+        const commonFonts = ['Montserrat', 'Inter', 'Roboto', 'Open Sans', 'Lato', 'Poppins', 'Raleway', 'Nunito', 'Playfair Display', 'Merriweather', 'Arial', 'Helvetica', 'Georgia', 'Times New Roman'];
+        const matchedFont = commonFonts.find(f => font.toLowerCase().includes(f.toLowerCase()));
+        if (matchedFont && !foundFonts.includes(matchedFont)) {
+          foundFonts.push(matchedFont);
+        } else if (!matchedFont && font && !foundFonts.includes(font)) {
+          // Try to extract font name (remove generic fallbacks)
+          const fontName = font.split(/\s+/)[0];
+          if (fontName && fontName.length > 2 && !['sans-serif', 'serif', 'monospace'].includes(fontName.toLowerCase())) {
+            foundFonts.push(fontName);
+          }
+        }
+      }
+    });
+    
+    if (foundFonts.length > 0) {
+      fonts.primary = foundFonts[0];
+      if (foundFonts.length > 1) fonts.secondary = foundFonts[1];
+    }
+    
     // Clean up text
     const cleanText = (text) => {
       if (!text) return '';
@@ -409,6 +504,8 @@ async function scrapeWebsite(url) {
       description: cleanText(description || mainContent),
       headings: headings.slice(0, 10),
       mainContent: cleanText(mainContent || description),
+      colors: colors,
+      fonts: fonts,
       url: url
     };
   } catch (err) {
@@ -4031,6 +4128,22 @@ app.get("/api/adaccounts/:actId/details", async (req, res) => {
 app.get("/api/adaccounts/:actId/insights", async (req,res) => {
   try { res.json(await fb(`/${req.params.actId}/insights`, "GET", { date_preset:"last_7d", fields:"spend,impressions,clicks,ctr,cpc,cpm" })); }
   catch(e){ res.status(500).json(e.response?.data || { error:String(e) }); }
+});
+
+// Scrape website endpoint for company profile
+app.post("/api/company/scrape-website", async (req, res) => {
+  try {
+    const { url } = req.body;
+    if (!url) {
+      return res.status(400).json({ error: "URL is required" });
+    }
+    
+    const websiteData = await scrapeWebsite(url);
+    res.json({ success: true, data: websiteData });
+  } catch (err) {
+    console.error("[Website Scraping] Error:", err);
+    res.status(500).json({ error: err.message || "Failed to scrape website" });
+  }
 });
 
 // Get Meta ad image specifications
