@@ -4735,13 +4735,142 @@ app.post("/api/ai/chat", async (req, res) => {
     // Load company context and past conversations
     const companyContext = loadCompanyContext();
     const pastConversations = loadConversations();
+    const lowerMessage = message.toLowerCase();
+    
+    // Detect intents and fetch real data
+    let dataContext = "";
+    let actions = [];
+    let detectedIntent = null;
+    
+    // Check for campaign/stats queries
+    if (lowerMessage.includes("stat") || lowerMessage.includes("performance") || 
+        lowerMessage.includes("spend") || lowerMessage.includes("impression") ||
+        lowerMessage.includes("click") || lowerMessage.includes("ctr") ||
+        (lowerMessage.includes("campaign") && !lowerMessage.includes("create"))) {
+      detectedIntent = "stats";
+      try {
+        if (TOKEN) {
+          const accounts = await fb(`/me/adaccounts`, "GET", { fields: "id,account_id,name" });
+          if (accounts.data && accounts.data.length > 0) {
+            let totalSpend = 0, totalImpressions = 0, totalClicks = 0;
+            for (const account of accounts.data) {
+              try {
+                const insights = await fb(`/${account.id}/insights`, "GET", {
+                  date_preset: "last_7d",
+                  fields: "spend,impressions,clicks,ctr,cpc,cpm"
+                });
+                if (insights.data && insights.data[0]) {
+                  const d = insights.data[0];
+                  totalSpend += parseFloat(d.spend || 0);
+                  totalImpressions += parseInt(d.impressions || 0);
+                  totalClicks += parseInt(d.clicks || 0);
+                }
+              } catch (e) {
+                // Continue
+              }
+            }
+            const ctr = totalImpressions > 0 ? ((totalClicks / totalImpressions) * 100).toFixed(2) : "0.00";
+            const cpc = totalClicks > 0 ? (totalSpend / totalClicks).toFixed(2) : "0.00";
+            dataContext += `\n\nCURRENT CAMPAIGN DATA (Last 7 days):\n- Total Spend: $${totalSpend.toFixed(2)}\n- Impressions: ${totalImpressions.toLocaleString()}\n- Clicks: ${totalClicks.toLocaleString()}\n- CTR: ${ctr}%\n- CPC: $${cpc}`;
+            actions.push({ type: "navigate", tab: "campaigns" });
+          }
+        }
+      } catch (err) {
+        dataContext += `\n\nNote: Could not fetch campaign stats. Error: ${err.message}`;
+      }
+    }
+    
+    // Check for campaign list queries
+    if (lowerMessage.includes("list campaign") || lowerMessage.includes("show campaign") ||
+        lowerMessage.includes("my campaign") || lowerMessage.includes("all campaign")) {
+      detectedIntent = "campaigns";
+      try {
+        if (TOKEN) {
+          const accounts = await fb(`/me/adaccounts`, "GET", { fields: "id" });
+          if (accounts.data && accounts.data.length > 0) {
+            const campaigns = [];
+            for (const account of accounts.data) {
+              try {
+                const result = await fb(`/${account.id}/campaigns`, "GET", {
+                  fields: "id,name,status",
+                  limit: 20
+                });
+                if (result.data) campaigns.push(...result.data);
+              } catch (e) {
+                // Continue
+              }
+            }
+            if (campaigns.length > 0) {
+              const activeCount = campaigns.filter(c => c.status === "ACTIVE").length;
+              const pausedCount = campaigns.filter(c => c.status === "PAUSED").length;
+              dataContext += `\n\nCURRENT CAMPAIGNS:\n- Total: ${campaigns.length}\n- Active: ${activeCount}\n- Paused: ${pausedCount}\n\nRecent campaigns: ${campaigns.slice(0, 5).map(c => `${c.name} (${c.status})`).join(", ")}`;
+              actions.push({ type: "navigate", tab: "campaigns" });
+            }
+          }
+        }
+      } catch (err) {
+        dataContext += `\n\nNote: Could not fetch campaigns. Error: ${err.message}`;
+      }
+    }
+    
+    // Check for product queries
+    if (lowerMessage.includes("product") && !lowerMessage.includes("create")) {
+      detectedIntent = "products";
+      try {
+        const products = await wooFetch("GET", "/products?per_page=10");
+        if (products && products.length > 0) {
+          dataContext += `\n\nAVAILABLE PRODUCTS (${products.length}):\n`;
+          products.slice(0, 5).forEach((p, i) => {
+            const normalized = normalizeProduct(p);
+            const name = normalized.name || "Unnamed";
+            const price = normalized.price ? `$${normalized.price}` : "N/A";
+            dataContext += `${i + 1}. ${name} - ${price}\n`;
+          });
+          actions.push({ type: "navigate", tab: "products" });
+          
+          // Try to find specific product mentioned
+          const productMatch = message.match(/\b(shampoo|hair|treatment|product|cream|serum|oil|mask)\b/i);
+          if (productMatch) {
+            const foundProduct = await findProductByName(productMatch[0]);
+            if (foundProduct) {
+              dataContext += `\n\nMATCHED PRODUCT DETAILS:\n- Name: ${foundProduct.name}\n- Price: ${foundProduct.price ? `$${foundProduct.price}` : "N/A"}\n- Description: ${(foundProduct.description || foundProduct.short_description || "").substring(0, 200)}`;
+            }
+          }
+        } else {
+          dataContext += `\n\nNote: No products found in WooCommerce.`;
+        }
+      } catch (err) {
+        dataContext += `\n\nNote: Could not fetch products from WooCommerce. Error: ${err.message}`;
+      }
+    }
+    
+    // Check for audience queries
+    if (lowerMessage.includes("audience") || lowerMessage.includes("target")) {
+      detectedIntent = "audiences";
+      actions.push({ type: "navigate", tab: "audiences" });
+    }
+    
+    // Check for AI studio queries
+    if (lowerMessage.includes("generate") || lowerMessage.includes("create image") || 
+        lowerMessage.includes("create video") || lowerMessage.includes("ai studio")) {
+      detectedIntent = "ai_studio";
+      actions.push({ type: "navigate", tab: "ai-studio" });
+    }
+    
+    // Build system prompt with detected data
     const systemPrompt = buildSystemPrompt(companyContext);
+    const enhancedSystemPrompt = systemPrompt + 
+      " You are a powerful AI assistant that can CONTROL the dashboard. " +
+      "When users ask about campaigns, products, audiences, or want to create content, you have access to REAL DATA. " +
+      "Use the data provided to give accurate, helpful responses. " +
+      "You can navigate users to different tabs, fetch real-time data, and perform actions. " +
+      "Be proactive and helpful - if they ask about something, fetch the data and show it to them.";
     
     // Build messages array for OpenAI
     const messages = [
       {
         role: "system",
-        content: systemPrompt + " Remember past conversations to provide personalized advice that builds on what you've discussed before. When they mention 'company profile', they mean the dashboard's Company Profile tab (not Facebook/Instagram settings). Most importantly: You CAN and SHOULD generate images and videos using Vertex AI (Imagen 3 & Veo 3)! When they ask about images or videos, respond enthusiastically and guide them: 'Absolutely! I can create product images and videos for you. Just say create an image of [product] or generate a video showing [product] and I will create it for you!' Be natural, helpful, and conversational - like you're genuinely excited to help them succeed."
+        content: enhancedSystemPrompt + (dataContext ? `\n\nREAL-TIME DATA:\n${dataContext}` : "")
       }
     ];
     
@@ -4766,10 +4895,10 @@ app.post("/api/ai/chat", async (req, res) => {
     const completion = await openaiWithFallback({
       model: "gpt-4o-mini",
       messages: messages,
-      temperature: 0.8, // Higher temperature for more natural, conversational responses
+      temperature: 0.8,
       max_tokens: 800,
-      presence_penalty: 0.3, // Encourage varied vocabulary
-      frequency_penalty: 0.2 // Reduce repetition for more natural flow
+      presence_penalty: 0.3,
+      frequency_penalty: 0.2
     });
 
     const aiResponse = completion.choices[0].message.content;
@@ -4777,7 +4906,13 @@ app.post("/api/ai/chat", async (req, res) => {
     // Save conversation to memory
     saveConversation(message, aiResponse);
     
-    res.json({ message: aiResponse });
+    // Return response with actions
+    res.json({ 
+      message: aiResponse,
+      actions: actions,
+      intent: detectedIntent,
+      data: dataContext ? { summary: dataContext.substring(0, 500) } : null
+    });
   } catch (err) {
     console.error("Chat error:", err);
     res.status(500).json({ error: err.message || "Failed to generate response" });
