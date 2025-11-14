@@ -4130,6 +4130,336 @@ app.get("/api/adaccounts/:actId/insights", async (req,res) => {
   catch(e){ res.status(500).json(e.response?.data || { error:String(e) }); }
 });
 
+// Control System - API Status Check
+app.get("/api/control/status", async (req, res) => {
+  try {
+    const status = {
+      success: true,
+      timestamp: new Date().toISOString(),
+      services: {}
+    };
+
+    // 1. OpenAI API Status
+    try {
+      if (process.env.OPENAI_API_KEY) {
+        const openaiTest = await openai.models.list();
+        status.services.openai = {
+          status: "connected",
+          name: "OpenAI API",
+          icon: "🤖",
+          lastChecked: new Date().toISOString(),
+          details: {
+            modelsAvailable: openaiTest.data?.length || 0,
+            configured: true
+          }
+        };
+      } else {
+        status.services.openai = {
+          status: "not_configured",
+          name: "OpenAI API",
+          icon: "🤖",
+          error: "OPENAI_API_KEY not configured"
+        };
+      }
+    } catch (err) {
+      status.services.openai = {
+        status: "error",
+        name: "OpenAI API",
+        icon: "🤖",
+        error: err.message || "Connection failed",
+        configured: !!process.env.OPENAI_API_KEY
+      };
+    }
+
+    // 2. Meta/Facebook API Status
+    try {
+      if (TOKEN) {
+        const fbTest = await fb("/me", "GET", { fields: "id,name" });
+        status.services.meta = {
+          status: "connected",
+          name: "Meta (Facebook & Instagram) Ads API",
+          icon: "📘",
+          lastChecked: new Date().toISOString(),
+          details: {
+            accountName: fbTest.name || "Connected",
+            accountId: fbTest.id || "N/A"
+          }
+        };
+      } else {
+        status.services.meta = {
+          status: "not_configured",
+          name: "Meta (Facebook & Instagram) Ads API",
+          icon: "📘",
+          error: "META_TOKEN not configured"
+        };
+      }
+    } catch (err) {
+      status.services.meta = {
+        status: "error",
+        name: "Meta (Facebook & Instagram) Ads API",
+        icon: "📘",
+        error: err.message,
+        configured: !!TOKEN
+      };
+    }
+
+    // 3. WooCommerce API Status
+    try {
+      if (WC_API_KEY && WC_API_SECRET) {
+        const wcTest = await wooFetch("GET", "/products?per_page=1");
+        status.services.woocommerce = {
+          status: "connected",
+          name: "WooCommerce API",
+          icon: "🛒",
+          lastChecked: new Date().toISOString(),
+          details: {
+            storeUrl: WC_API_URL.replace(/\/wp-json.*$/, ""),
+            apiConfigured: true
+          }
+        };
+      } else {
+        status.services.woocommerce = {
+          status: "not_configured",
+          name: "WooCommerce API",
+          icon: "🛒",
+          error: "WC_API_KEY or WC_API_SECRET not configured"
+        };
+      }
+    } catch (err) {
+      status.services.woocommerce = {
+        status: "error",
+        name: "WooCommerce API",
+        icon: "🛒",
+        error: err.message,
+        configured: !!(WC_API_KEY && WC_API_SECRET)
+      };
+    }
+
+    // 4. Google Cloud / Vertex AI Status
+    try {
+      const hasVertex = !!process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON;
+      status.services.vertex = {
+        status: hasVertex ? "configured" : "not_configured",
+        name: "Google Cloud / Vertex AI",
+        icon: "☁️",
+        lastChecked: new Date().toISOString(),
+        details: {
+          configured: hasVertex,
+          services: ["Imagen 3 (Image Generation)", "Veo 3 (Video Generation)"]
+        }
+      };
+    } catch (err) {
+      status.services.vertex = {
+        status: "error",
+        name: "Google Cloud / Vertex AI",
+        icon: "☁️",
+        error: err.message
+      };
+    }
+
+    // 5. WhatsApp API Status
+    try {
+      const hasWhatsApp = !!(WHATSAPP_PHONE_NUMBER_ID && WHATSAPP_ACCESS_TOKEN);
+      status.services.whatsapp = {
+        status: hasWhatsApp ? "configured" : "not_configured",
+        name: "WhatsApp Business API",
+        icon: "💬",
+        lastChecked: new Date().toISOString(),
+        details: {
+          phoneNumberId: WHATSAPP_PHONE_NUMBER_ID || "Not configured",
+          webhookConfigured: !!process.env.WHATSAPP_VERIFY_TOKEN,
+          adminNumbers: ADMIN_NUMBERS.length
+        }
+      };
+    } catch (err) {
+      status.services.whatsapp = {
+        status: "error",
+        name: "WhatsApp Business API",
+        icon: "💬",
+        error: err.message
+      };
+    }
+
+    // 6. Server/Hosting Status
+    status.services.server = {
+      status: "running",
+      name: "Backend Server",
+      icon: "🖥️",
+      lastChecked: new Date().toISOString(),
+      details: {
+        nodeVersion: process.version,
+        uptime: process.uptime(),
+        memory: {
+          used: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
+          total: Math.round(process.memoryUsage().heapTotal / 1024 / 1024)
+        }
+      }
+    };
+
+    res.json(status);
+  } catch (err) {
+    console.error("[Control System] Status check error:", err);
+    res.status(500).json({ 
+      success: false, 
+      error: err.message || "Failed to check API status",
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+// Control System - API Billing/Usage (where available)
+app.get("/api/control/billing", async (req, res) => {
+  try {
+    const billing = {
+      success: true,
+      timestamp: new Date().toISOString(),
+      services: {}
+    };
+
+    // OpenAI Usage (if available via API)
+    try {
+      if (process.env.OPENAI_API_KEY) {
+        // Note: OpenAI doesn't provide billing API, but we can track usage
+        billing.services.openai = {
+          name: "OpenAI API",
+          icon: "🤖",
+          billingAvailable: false,
+          note: "Check usage at https://platform.openai.com/usage",
+          estimatedCost: "Pay-as-you-go pricing"
+        };
+      }
+    } catch (err) {
+      billing.services.openai = { error: err.message };
+    }
+
+    // Meta Ads Billing (via Meta API)
+    try {
+      if (TOKEN) {
+        // Try to get ad account spend
+        const accounts = await fb("/me/adaccounts", "GET", { 
+          fields: "id,name,account_id,currency,spend_cap,amount_spent" 
+        });
+        
+        if (accounts.data && accounts.data.length > 0) {
+          const account = accounts.data[0];
+          billing.services.meta = {
+            name: "Meta Ads",
+            icon: "📘",
+            billingAvailable: true,
+            currency: account.currency || "USD",
+            spendCap: account.spend_cap ? `$${account.spend_cap}` : "No limit",
+            amountSpent: account.amount_spent ? `$${account.amount_spent}` : "$0",
+            accountName: account.name,
+            accountId: account.account_id
+          };
+        } else {
+          billing.services.meta = {
+            name: "Meta Ads",
+            icon: "📘",
+            billingAvailable: false,
+            note: "No ad accounts found"
+          };
+        }
+      }
+    } catch (err) {
+      billing.services.meta = {
+        name: "Meta Ads",
+        icon: "📘",
+        billingAvailable: false,
+        error: err.message
+      };
+    }
+
+    // Google Cloud Billing (if credentials available)
+    try {
+      if (process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON) {
+        billing.services.vertex = {
+          name: "Google Cloud / Vertex AI",
+          icon: "☁️",
+          billingAvailable: false,
+          note: "Check billing at https://console.cloud.google.com/billing",
+          estimatedCost: "Pay-as-you-go pricing for Imagen 3 & Veo 3"
+        };
+      }
+    } catch (err) {
+      billing.services.vertex = { error: err.message };
+    }
+
+    // WhatsApp Business API Billing
+    try {
+      if (WHATSAPP_ACCESS_TOKEN) {
+        billing.services.whatsapp = {
+          name: "WhatsApp Business API",
+          icon: "💬",
+          billingAvailable: false,
+          note: "Check billing in Meta Business Manager",
+          pricing: "Per conversation pricing model"
+        };
+      }
+    } catch (err) {
+      billing.services.whatsapp = { error: err.message };
+    }
+
+    res.json(billing);
+  } catch (err) {
+    console.error("[Control System] Billing check error:", err);
+    res.status(500).json({ 
+      success: false, 
+      error: err.message || "Failed to check billing information",
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+// Control System - System Health
+app.get("/api/control/health", async (req, res) => {
+  try {
+    const health = {
+      success: true,
+      timestamp: new Date().toISOString(),
+      system: {
+        nodeVersion: process.version,
+        platform: process.platform,
+        uptime: Math.round(process.uptime()),
+        uptimeFormatted: formatUptime(process.uptime()),
+        memory: {
+          used: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
+          total: Math.round(process.memoryUsage().heapTotal / 1024 / 1024),
+          external: Math.round(process.memoryUsage().external / 1024 / 1024),
+          rss: Math.round(process.memoryUsage().rss / 1024 / 1024)
+        },
+        cpu: process.cpuUsage()
+      },
+      files: {
+        companyProfile: fs.existsSync(COMPANY_FILE),
+        audiences: fs.existsSync(AUDIENCES_FILE),
+        conversations: fs.existsSync(CONVERSATIONS_FILE)
+      }
+    };
+
+    res.json(health);
+  } catch (err) {
+    console.error("[Control System] Health check error:", err);
+    res.status(500).json({ 
+      success: false, 
+      error: err.message || "Failed to check system health",
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+function formatUptime(seconds) {
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const secs = Math.floor(seconds % 60);
+  
+  if (days > 0) return `${days}d ${hours}h ${minutes}m`;
+  if (hours > 0) return `${hours}h ${minutes}m ${secs}s`;
+  if (minutes > 0) return `${minutes}m ${secs}s`;
+  return `${secs}s`;
+}
+
 // Scrape website endpoint for company profile
 app.post("/api/company/scrape-website", async (req, res) => {
   try {
