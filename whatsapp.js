@@ -61,8 +61,109 @@ function getGenerateVideo() {
   return vertexServiceModule?.generateVideo || null;
 }
 
-import { uploadWhatsAppMedia, sendWhatsAppImage, sendWhatsAppVideo, sendWhatsAppText } from "../services/whatsappService.js";
-import { findProduct, getProductSummary, getProductPrimaryImage, getProductGallery, isWooCommerceConfigured } from "../services/wooService.js";
+// Helper function to import whatsappService with fallback paths
+async function importWhatsAppService() {
+  const whatsappPaths = [
+    "../services/whatsappService.js",
+    "./services/whatsappService.js",
+    path.join(__dirname, "../services/whatsappService.js"),
+    path.join(__dirname, "../../services/whatsappService.js"),
+    path.join(process.cwd(), "services/whatsappService.js")
+  ];
+
+  for (const whatsappPath of whatsappPaths) {
+    try {
+      const checkPath = whatsappPath.startsWith(".") 
+        ? path.resolve(__dirname, whatsappPath)
+        : whatsappPath;
+      
+      if (fs.existsSync(checkPath)) {
+        const normalizedPath = whatsappPath.startsWith(".") 
+          ? whatsappPath 
+          : `file://${whatsappPath}`;
+        const whatsappService = await import(normalizedPath);
+        if (whatsappService.uploadWhatsAppMedia) {
+          console.log(`[WhatsApp Routes] Loaded whatsappService from: ${whatsappPath}`);
+          return whatsappService;
+        }
+      }
+    } catch (err) {
+      continue;
+    }
+  }
+  
+  console.warn("[WhatsApp Routes] whatsappService not found");
+  return { 
+    uploadWhatsAppMedia: null, 
+    sendWhatsAppImage: null, 
+    sendWhatsAppVideo: null, 
+    sendWhatsAppText: null 
+  };
+}
+
+// Helper function to import wooService with fallback paths
+async function importWooService() {
+  const wooPaths = [
+    "../services/wooService.js",
+    "./services/wooService.js",
+    path.join(__dirname, "../services/wooService.js"),
+    path.join(__dirname, "../../services/wooService.js"),
+    path.join(process.cwd(), "services/wooService.js")
+  ];
+
+  for (const wooPath of wooPaths) {
+    try {
+      const checkPath = wooPath.startsWith(".") 
+        ? path.resolve(__dirname, wooPath)
+        : wooPath;
+      
+      if (fs.existsSync(checkPath)) {
+        const normalizedPath = wooPath.startsWith(".") 
+          ? wooPath 
+          : `file://${wooPath}`;
+        const wooService = await import(normalizedPath);
+        if (wooService.findProduct) {
+          console.log(`[WhatsApp Routes] Loaded wooService from: ${wooPath}`);
+          return wooService;
+        }
+      }
+    } catch (err) {
+      continue;
+    }
+  }
+  
+  console.warn("[WhatsApp Routes] wooService not found");
+  return { 
+    findProduct: null, 
+    getProductSummary: null, 
+    getProductPrimaryImage: null, 
+    getProductGallery: null, 
+    isWooCommerceConfigured: null 
+  };
+}
+
+// Import services (will be resolved when needed)
+let whatsappServiceModule = null;
+let wooServiceModule = null;
+
+const whatsappServicePromise = importWhatsAppService().then(module => {
+  whatsappServiceModule = module;
+  return module;
+});
+
+const wooServicePromise = importWooService().then(module => {
+  wooServiceModule = module;
+  return module;
+});
+
+// Lazy getters for service functions
+function getWhatsAppService() {
+  return whatsappServiceModule || { uploadWhatsAppMedia: null, sendWhatsAppImage: null, sendWhatsAppVideo: null, sendWhatsAppText: null };
+}
+
+function getWooService() {
+  return wooServiceModule || { findProduct: null, getProductSummary: null, getProductPrimaryImage: null, getProductGallery: null, isWooCommerceConfigured: null };
+}
 
 const router = express.Router();
 
@@ -190,57 +291,63 @@ async function handleIncomingMessage(message, contact) {
     let selectedImageUrl = command.productImageUrl;
     
     if (command.productId || command.productQuery) {
-      if (!isWooCommerceConfigured()) {
-        await sendWhatsAppText(from, "⚠️ I couldn't access the product catalog yet. Please set WC_API_URL, WC_API_KEY, and WC_API_SECRET.");
+      const wooService = await wooServicePromise;
+      if (!wooService.isWooCommerceConfigured?.()) {
+        const whatsappService = await whatsappServicePromise;
+        await whatsappService.sendWhatsAppText?.(from, "⚠️ I couldn't access the product catalog yet. Please set WC_API_URL, WC_API_KEY, and WC_API_SECRET.");
         return false;
       }
       
       try {
-        product = await findProduct(command.productId || command.productQuery);
+        product = await wooService.findProduct?.(command.productId || command.productQuery);
         
         if (!product) {
-          await sendWhatsAppText(from, `❌ Product not found: ${command.productId || command.productQuery}\n\nTry searching with a different name or ID.`);
+          const whatsappService = await whatsappServicePromise;
+          await whatsappService.sendWhatsAppText?.(from, `❌ Product not found: ${command.productId || command.productQuery}\n\nTry searching with a different name or ID.`);
           return false;
         }
         
         // Get product summary for context
-        productContext = getProductSummary(product);
+        productContext = wooService.getProductSummary?.(product);
         
         // Build caption with product info
-        productCaption = `✅ Created with ${productContext.title}`;
-        if (productContext.permalink) {
+        productCaption = `✅ Created with ${productContext?.title || 'product'}`;
+        if (productContext?.permalink) {
           productCaption += ` — ${productContext.permalink}`;
         }
         
         // For edit mode, select image source
         if (command.mode === "edit" && !selectedImageUrl) {
-          const primaryImage = getProductPrimaryImage(product);
+          const primaryImage = wooService.getProductPrimaryImage?.(product);
           if (primaryImage) {
             selectedImageUrl = primaryImage;
           } else if (command.useGallery) {
-            const gallery = getProductGallery(product);
+            const gallery = wooService.getProductGallery?.(product) || [];
             if (gallery.length > 0) {
               selectedImageUrl = gallery[0];
             }
           }
           
           if (!selectedImageUrl) {
-            await sendWhatsAppText(from, "❌ No product image available. Please provide url=<image_url> or ensure product has images.");
+            const whatsappService = await whatsappServicePromise;
+            await whatsappService.sendWhatsAppText?.(from, "❌ No product image available. Please provide url=<image_url> or ensure product has images.");
             return false;
           }
         }
         
-        console.log(`[WhatsApp Webhook] Product loaded: ${productContext.title} (ID: ${product.id})`);
+        console.log(`[WhatsApp Webhook] Product loaded: ${productContext?.title || 'Unknown'} (ID: ${product?.id})`);
       } catch (err) {
         console.error("[WhatsApp Webhook] Error fetching product:", err.message);
-        await sendWhatsAppText(from, `❌ Failed to fetch product: ${err.message}`);
+        const whatsappService = await whatsappServicePromise;
+        await whatsappService.sendWhatsAppText?.(from, `❌ Failed to fetch product: ${err.message}`);
         return false;
       }
     }
     
     // Send acknowledgment
+    const whatsappService = await whatsappServicePromise;
     const modeText = command.mode === "video" ? "video (this may take 1-2 minutes)" : command.mode;
-    await sendWhatsAppText(from, `🎨 Creating ${modeText}... Please wait!`);
+    await whatsappService.sendWhatsAppText?.(from, `🎨 Creating ${modeText}... Please wait!`);
     
     let result;
     
@@ -258,7 +365,8 @@ async function handleIncomingMessage(message, contact) {
         
       case "edit":
         if (!selectedImageUrl) {
-          await sendWhatsAppText(from, "❌ I need an image URL to edit. Please provide: edit: <instruction> | url=<image_url> or | product=<id>");
+          const whatsappService = await whatsappServicePromise;
+          await whatsappService.sendWhatsAppText?.(from, "❌ I need an image URL to edit. Please provide: edit: <instruction> | url=<image_url> or | product=<id>");
           return false;
         }
         // Ensure vertexService is loaded
@@ -281,12 +389,14 @@ async function handleIncomingMessage(message, contact) {
         break;
         
       default:
-        await sendWhatsAppText(from, `❌ Unknown mode: ${command.mode}`);
+        const whatsappService = await whatsappServicePromise;
+        await whatsappService.sendWhatsAppText?.(from, `❌ Unknown mode: ${command.mode}`);
         return false;
     }
     
     // Upload to WhatsApp
-    const mediaId = await uploadWhatsAppMedia(result.buffer, result.mimeType);
+    const whatsappService = await whatsappServicePromise;
+    const mediaId = await whatsappService.uploadWhatsAppMedia?.(result.buffer, result.mimeType);
     
     // Store media for later use
     if (!generatedMediaStore.has(from)) {
@@ -321,13 +431,13 @@ async function handleIncomingMessage(message, contact) {
     
     // Send media message with options
     if (result.mimeType.includes("video")) {
-      await sendWhatsAppVideo(from, mediaId, caption);
+      await whatsappService.sendWhatsAppVideo?.(from, mediaId, caption);
       // Send product link as follow-up text if available (WhatsApp video caption limits)
       if (productCaption && productContext?.permalink) {
-        await sendWhatsAppText(from, productCaption);
+        await whatsappService.sendWhatsAppText?.(from, productCaption);
       }
     } else {
-      await sendWhatsAppImage(from, mediaId, caption);
+      await whatsappService.sendWhatsAppImage?.(from, mediaId, caption);
     }
     
     console.log(`[WhatsApp Webhook] Successfully sent ${command.mode} to ${from}${productContext ? ` (product: ${productContext.title})` : ""}`);
@@ -335,7 +445,8 @@ async function handleIncomingMessage(message, contact) {
     
   } catch (err) {
     console.error(`[WhatsApp Webhook] Error processing command:`, err);
-    await sendWhatsAppText(from, `❌ Error: ${err.message || "Failed to generate media"}\n\nTry again or use: image: <prompt> | product=123 or video: <prompt> | find="product name"`);
+    const whatsappService = await whatsappServicePromise;
+    await whatsappService.sendWhatsAppText?.(from, `❌ Error: ${err.message || "Failed to generate media"}\n\nTry again or use: image: <prompt> | product=123 or video: <prompt> | find="product name"`);
     return false; // Error handled
   }
 }
@@ -344,11 +455,12 @@ async function handleIncomingMessage(message, contact) {
  * Handle media actions (use, edit, regenerate)
  */
 async function handleMediaAction(from, actionText) {
+  const whatsappService = await whatsappServicePromise;
   const lowerAction = actionText.toLowerCase();
   const mediaStore = generatedMediaStore.get(from);
   
   if (!mediaStore || mediaStore.length === 0) {
-    await sendWhatsAppText(from, "❌ No recent media found. Generate an image or video first!");
+    await whatsappService.sendWhatsAppText?.(from, "❌ No recent media found. Generate an image or video first!");
     return;
   }
   
@@ -356,11 +468,11 @@ async function handleMediaAction(from, actionText) {
   
   if (lowerAction.includes("use")) {
     // Use in campaign - store media info for campaign creation
-    await sendWhatsAppText(from, `✅ Perfect! I've saved this ${lastMedia.mode} for your campaign.\n\n📦 Media ID: ${lastMedia.mediaId}\n📝 Prompt: "${lastMedia.prompt}"\n📐 Aspect: ${lastMedia.aspectRatio || "default"}\n\n💡 You can now:\n• Create a campaign with this media\n• Use /createad <product> to create an ad\n• Or ask me to help create a campaign!`);
+    await whatsappService.sendWhatsAppText?.(from, `✅ Perfect! I've saved this ${lastMedia.mode} for your campaign.\n\n📦 Media ID: ${lastMedia.mediaId}\n📝 Prompt: "${lastMedia.prompt}"\n📐 Aspect: ${lastMedia.aspectRatio || "default"}\n\n💡 You can now:\n• Create a campaign with this media\n• Use /createad <product> to create an ad\n• Or ask me to help create a campaign!`);
   } else if (lowerAction.includes("edit")) {
-    await sendWhatsAppText(from, `✏️ To edit this ${lastMedia.mode}, send:\n\n"edit: <your instruction> | url=<image_url>"\n\nOr describe what you want to change!`);
+    await whatsappService.sendWhatsAppText?.(from, `✏️ To edit this ${lastMedia.mode}, send:\n\n"edit: <your instruction> | url=<image_url>"\n\nOr describe what you want to change!`);
   } else if (lowerAction.includes("regenerate")) {
-    await sendWhatsAppText(from, `🔄 Regenerating...`);
+    await whatsappService.sendWhatsAppText?.(from, `🔄 Regenerating...`);
     const command = {
       mode: lastMedia.mode,
       prompt: lastMedia.prompt,
@@ -370,7 +482,7 @@ async function handleMediaAction(from, actionText) {
     await handleIncomingMessage({ from, text: { body: `${command.mode}: ${command.prompt}` }, type: "text" }, null);
   } else if (lowerAction.includes("video") || lowerAction.includes("make video")) {
     // Convert image to video
-    await sendWhatsAppText(from, `🎬 Creating video version...`);
+    await whatsappService.sendWhatsAppText?.(from, `🎬 Creating video version...`);
     const command = {
       mode: "video",
       prompt: `Animated version of: ${lastMedia.prompt}`,
