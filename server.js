@@ -6854,10 +6854,102 @@ function addMediaRoutesDirectly() {
     }
   });
   
+  // Video generation endpoint using Veo 3
+  app.post("/api/media/video", requireAdminKey, async (req, res) => {
+    console.log("[Video API] Request received");
+    try {
+      const { prompt, imageUrl, aspectRatio, durationSec, quality } = req.body;
+      
+      if (!prompt) {
+        return res.status(400).json({ success: false, error: "Missing prompt" });
+      }
+      
+      // Import Vertex service for Veo 3
+      let vertexService;
+      const possiblePaths = [
+        "./services/vertexService.js",
+        path.join(__dirname, "services", "vertexService.js"),
+        path.join(process.cwd(), "services", "vertexService.js"),
+        "../services/vertexService.js"
+      ];
+      
+      let importError = null;
+      for (const importPath of possiblePaths) {
+        try {
+          const normalizedPath = importPath.startsWith(".") 
+            ? importPath 
+            : `file://${importPath}`;
+          vertexService = await import(normalizedPath);
+          if (vertexService.generateVideo) {
+            console.log(`[Video API] Successfully imported vertexService from: ${importPath}`);
+            break;
+          }
+        } catch (err) {
+          importError = err;
+          continue;
+        }
+      }
+      
+      if (!vertexService || !vertexService.generateVideo) {
+        console.error("[Video API] Vertex service not available:", importError?.message);
+        return res.status(503).json({ 
+          success: false, 
+          error: "Veo 3 service not available. Please ensure Vertex AI is configured.",
+          details: importError?.message || "Service not found"
+        });
+      }
+      
+      // Determine final duration based on quality
+      let finalDuration = durationSec || 5;
+      if (quality === 'fast' && finalDuration > 5) {
+        finalDuration = 5; // Veo 3 Fast supports up to 5 seconds
+      }
+      finalDuration = Math.min(Math.max(finalDuration, 5), 60); // Clamp between 5-60 seconds
+      
+      // Enhance prompt with image description if provided
+      let finalPrompt = prompt;
+      if (imageUrl) {
+        // If imageUrl is provided, enhance the prompt to reference it
+        // Note: Veo 3 may support initial frames, but for now we'll describe the image in the prompt
+        finalPrompt = `Starting from an image showing: ${prompt}. ${prompt}`;
+        console.log(`[Video API] Image-to-video generation with image reference`);
+      }
+      
+      console.log(`[Video API] Generating video with Veo 3: "${finalPrompt.substring(0, 100)}..." (${finalDuration}s, ${aspectRatio})`);
+      
+      // Generate video using Veo 3
+      const result = await vertexService.generateVideo(
+        finalPrompt,
+        aspectRatio || "16:9",
+        finalDuration,
+        null // productContext - can be enhanced later
+      );
+      
+      console.log(`[Video API] Video generated successfully (${result.buffer.length} bytes)`);
+      
+      res.set({
+        "Content-Type": result.mimeType,
+        "Content-Length": result.buffer.length,
+        "X-Model": result.model,
+        "X-Source": "veo-3-video"
+      });
+      res.send(result.buffer);
+    } catch (err) {
+      console.error("[Video API] Error:", err);
+      console.error("[Video API] Error stack:", err.stack);
+      res.status(500).json({ 
+        success: false, 
+        error: err.message || "Video generation failed",
+        details: process.env.NODE_ENV === 'development' ? err.stack : undefined
+      });
+    }
+  });
+  
   console.log("✅ Media routes added directly");
   console.log("   - GET /api/media/test");
   console.log("   - POST /api/media/create");
   console.log("   - POST /api/media/composite");
+  console.log("   - POST /api/media/video");
 }
 
 // Load routes before starting server
