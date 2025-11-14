@@ -4033,6 +4033,76 @@ app.get("/api/adaccounts/:actId/insights", async (req,res) => {
   catch(e){ res.status(500).json(e.response?.data || { error:String(e) }); }
 });
 
+// Get Meta ad image specifications
+app.get("/api/meta/ad-image-specs", async (req, res) => {
+  try {
+    const { objective } = req.query;
+    
+    // Standard Meta ad image specifications (from Meta's official documentation)
+    // These are the current requirements as of 2024
+    const imageSpecs = {
+      feed: {
+        name: "Feed (Facebook & Instagram)",
+        sizes: [
+          { name: "Square", width: 1080, height: 1080, ratio: "1:1", minWidth: 600, minHeight: 600 },
+          { name: "Landscape", width: 1200, height: 628, ratio: "1.91:1", minWidth: 600, minHeight: 315 },
+          { name: "Portrait", width: 1080, height: 1350, ratio: "4:5", minWidth: 600, minHeight: 750 }
+        ],
+        formats: ["JPG", "PNG"],
+        maxSize: "30MB"
+      },
+      stories: {
+        name: "Stories (Facebook & Instagram)",
+        sizes: [
+          { name: "Stories", width: 1080, height: 1920, ratio: "9:16", minWidth: 500, minHeight: 889 }
+        ],
+        formats: ["JPG", "PNG"],
+        maxSize: "30MB"
+      },
+      reels: {
+        name: "Reels",
+        sizes: [
+          { name: "Reels", width: 1080, height: 1920, ratio: "9:16", minWidth: 500, minHeight: 889 }
+        ],
+        formats: ["JPG", "PNG", "MP4", "MOV"],
+        maxSize: "4GB"
+      },
+      carousel: {
+        name: "Carousel",
+        sizes: [
+          { name: "Square", width: 1080, height: 1080, ratio: "1:1", minWidth: 600, minHeight: 600 },
+          { name: "Landscape", width: 1200, height: 628, ratio: "1.91:1", minWidth: 600, minHeight: 315 }
+        ],
+        formats: ["JPG", "PNG"],
+        maxSize: "30MB per image"
+      }
+    };
+    
+    // Return specs based on objective
+    let recommendedSpecs = [];
+    if (objective === "VIDEO_VIEWS" || objective === "ENGAGEMENT") {
+      recommendedSpecs = [imageSpecs.feed, imageSpecs.stories, imageSpecs.reels];
+    } else if (objective === "CONVERSIONS" || objective === "TRAFFIC") {
+      recommendedSpecs = [imageSpecs.feed, imageSpecs.carousel];
+    } else {
+      recommendedSpecs = [imageSpecs.feed, imageSpecs.stories];
+    }
+    
+    res.json({
+      success: true,
+      specs: imageSpecs,
+      recommended: recommendedSpecs,
+      objective: objective || "GENERAL"
+    });
+  } catch (e) {
+    console.error("[Meta Specs] Error:", e);
+    res.status(500).json({
+      success: false,
+      error: e.message || "Failed to fetch image specifications"
+    });
+  }
+});
+
 // Create campaign endpoint
 app.post("/api/campaigns/create", requireAdminKey, async (req, res) => {
   try {
