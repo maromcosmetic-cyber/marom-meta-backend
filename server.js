@@ -4130,6 +4130,19 @@ app.get("/api/adaccounts/:actId/insights", async (req,res) => {
   catch(e){ res.status(500).json(e.response?.data || { error:String(e) }); }
 });
 
+// Helper function to format uptime
+function formatUptime(seconds) {
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const secs = Math.floor(seconds % 60);
+  
+  if (days > 0) return `${days}d ${hours}h ${minutes}m`;
+  if (hours > 0) return `${hours}h ${minutes}m ${secs}s`;
+  if (minutes > 0) return `${minutes}m ${secs}s`;
+  return `${secs}s`;
+}
+
 // Control System - API Status Check
 app.get("/api/control/status", async (req, res) => {
   try {
@@ -4257,6 +4270,57 @@ app.get("/api/control/status", async (req, res) => {
       };
     }
 
+    // 4b. Google Gemini API Status
+    try {
+      if (process.env.GEMINI_API_KEY) {
+        // Try to import and test Gemini service
+        try {
+          const geminiService = await import("./services/geminiService.js");
+          const testResult = await geminiService.testGeminiConnection();
+          
+          status.services.gemini = {
+            status: testResult.success ? "connected" : "error",
+            name: "Google Gemini API",
+            icon: "🤖",
+            lastChecked: new Date().toISOString(),
+            details: {
+              configured: true,
+              model: testResult.model || "gemini-2.5-flash-image",
+              message: testResult.message || "Connected"
+            }
+          };
+        } catch (importErr) {
+          // If import fails, just show configured status
+          status.services.gemini = {
+            status: "configured",
+            name: "Google Gemini API",
+            icon: "🤖",
+            lastChecked: new Date().toISOString(),
+            details: {
+              configured: true,
+              model: "gemini-2.5-flash-image",
+              note: "Service file not accessible for connection test"
+            }
+          };
+        }
+      } else {
+        status.services.gemini = {
+          status: "not_configured",
+          name: "Google Gemini API",
+          icon: "🤖",
+          error: "GEMINI_API_KEY not configured"
+        };
+      }
+    } catch (err) {
+      status.services.gemini = {
+        status: "error",
+        name: "Google Gemini API",
+        icon: "🤖",
+        error: err.message,
+        configured: !!process.env.GEMINI_API_KEY
+      };
+    }
+
     // 5. WhatsApp API Status
     try {
       const hasWhatsApp = !!(WHATSAPP_PHONE_NUMBER_ID && WHATSAPP_ACCESS_TOKEN);
@@ -4281,6 +4345,7 @@ app.get("/api/control/status", async (req, res) => {
     }
 
     // 6. Server/Hosting Status
+    const memUsage = process.memoryUsage();
     status.services.server = {
       status: "running",
       name: "Backend Server",
@@ -4288,11 +4353,13 @@ app.get("/api/control/status", async (req, res) => {
       lastChecked: new Date().toISOString(),
       details: {
         nodeVersion: process.version,
-        uptime: process.uptime(),
-        memory: {
-          used: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
-          total: Math.round(process.memoryUsage().heapTotal / 1024 / 1024)
-        }
+        platform: process.platform,
+        uptime: formatUptime(process.uptime()),
+        uptimeSeconds: Math.round(process.uptime()),
+        memoryUsed: Math.round(memUsage.heapUsed / 1024 / 1024) + " MB",
+        memoryTotal: Math.round(memUsage.heapTotal / 1024 / 1024) + " MB",
+        memoryRSS: Math.round(memUsage.rss / 1024 / 1024) + " MB",
+        memoryPercent: Math.round((memUsage.heapUsed / memUsage.heapTotal) * 100) + "%"
       }
     };
 
@@ -4385,6 +4452,22 @@ app.get("/api/control/billing", async (req, res) => {
       billing.services.vertex = { error: err.message };
     }
 
+    // Google Gemini API Billing
+    try {
+      if (process.env.GEMINI_API_KEY) {
+        billing.services.gemini = {
+          name: "Google Gemini API",
+          icon: "🤖",
+          billingAvailable: false,
+          note: "Check usage at https://aistudio.google.com/app/apikey",
+          estimatedCost: "Free tier available, then pay-as-you-go pricing",
+          pricing: "Free tier: 15 requests/minute, then usage-based"
+        };
+      }
+    } catch (err) {
+      billing.services.gemini = { error: err.message };
+    }
+
     // WhatsApp Business API Billing
     try {
       if (WHATSAPP_ACCESS_TOKEN) {
@@ -4448,17 +4531,6 @@ app.get("/api/control/health", async (req, res) => {
   }
 });
 
-function formatUptime(seconds) {
-  const days = Math.floor(seconds / 86400);
-  const hours = Math.floor((seconds % 86400) / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
-  const secs = Math.floor(seconds % 60);
-  
-  if (days > 0) return `${days}d ${hours}h ${minutes}m`;
-  if (hours > 0) return `${hours}h ${minutes}m ${secs}s`;
-  if (minutes > 0) return `${minutes}m ${secs}s`;
-  return `${secs}s`;
-}
 
 // Scrape website endpoint for company profile
 app.post("/api/company/scrape-website", async (req, res) => {
