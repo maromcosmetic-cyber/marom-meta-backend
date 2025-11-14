@@ -6771,9 +6771,93 @@ function addMediaRoutesDirectly() {
     }
   });
   
+  // Composite scene generation endpoint using Gemini API
+  app.post("/api/media/composite", requireAdminKey, async (req, res) => {
+    console.log("[Composite API] Request received");
+    try {
+      const { prompt, referenceImages, aspectRatio } = req.body;
+      
+      if (!prompt) {
+        return res.status(400).json({ success: false, error: "Missing prompt" });
+      }
+      
+      if (!referenceImages || !Array.isArray(referenceImages) || referenceImages.length === 0) {
+        return res.status(400).json({ success: false, error: "Missing referenceImages array" });
+      }
+      
+      if (referenceImages.length > 3) {
+        return res.status(400).json({ success: false, error: "Maximum 3 reference images supported" });
+      }
+      
+      // Import Gemini service
+      let geminiService;
+      const possiblePaths = [
+        "./services/geminiService.js",
+        path.join(__dirname, "services", "geminiService.js"),
+        path.join(process.cwd(), "services", "geminiService.js"),
+        "../services/geminiService.js"
+      ];
+      
+      let importError = null;
+      for (const importPath of possiblePaths) {
+        try {
+          const normalizedPath = importPath.startsWith(".") 
+            ? importPath 
+            : `file://${importPath}`;
+          geminiService = await import(normalizedPath);
+          if (geminiService.generateImageWithReferences) {
+            console.log(`[Composite API] Successfully imported geminiService from: ${importPath}`);
+            break;
+          }
+        } catch (err) {
+          importError = err;
+          continue;
+        }
+      }
+      
+      if (!geminiService || !geminiService.generateImageWithReferences) {
+        console.error("[Composite API] Gemini service not available:", importError?.message);
+        return res.status(503).json({ 
+          success: false, 
+          error: "Gemini API service not available. Please ensure GEMINI_API_KEY is configured.",
+          details: importError?.message || "Service not found"
+        });
+      }
+      
+      console.log(`[Composite API] Generating composite with ${referenceImages.length} reference image(s)`);
+      console.log(`[Composite API] Prompt: "${prompt.substring(0, 100)}..."`);
+      
+      // Generate composite image using Gemini with reference images
+      const result = await geminiService.generateImageWithReferences(
+        prompt,
+        referenceImages,
+        { aspectRatio: aspectRatio || "1:1" }
+      );
+      
+      console.log(`[Composite API] Image generated successfully (${result.buffer.length} bytes)`);
+      
+      res.set({
+        "Content-Type": result.mimeType,
+        "Content-Length": result.buffer.length,
+        "X-Model": result.model,
+        "X-Source": "gemini-composite"
+      });
+      res.send(result.buffer);
+    } catch (err) {
+      console.error("[Composite API] Error:", err);
+      console.error("[Composite API] Error stack:", err.stack);
+      res.status(500).json({ 
+        success: false, 
+        error: err.message || "Composite generation failed",
+        details: process.env.NODE_ENV === 'development' ? err.stack : undefined
+      });
+    }
+  });
+  
   console.log("✅ Media routes added directly");
   console.log("   - GET /api/media/test");
   console.log("   - POST /api/media/create");
+  console.log("   - POST /api/media/composite");
 }
 
 // Load routes before starting server
