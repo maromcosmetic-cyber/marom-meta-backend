@@ -126,7 +126,7 @@ async function wooFetch(method, endpoint, body = null) {
   const config = {
     method,
     url: urlWithAuth,
-    timeout: 15000,
+    timeout: 30000, // Increased timeout to 30 seconds
     headers: {
       "Content-Type": "application/json",
       "Accept": "application/json"
@@ -4018,7 +4018,7 @@ async function handleRedo(from) {
 
 // 1) List ad accounts
 app.get("/api/adaccounts", async (_,res) => {
-  try { res.json(await fb(`/me/adaccounts`, "GET", { fields: "id,account_id,name,currency,status" })); }
+  try { res.json(await fb(`/me/adaccounts`, "GET", { fields: "id,account_id,name,currency,account_status" })); }
   catch(e){ res.status(500).json(e.response?.data || { error:String(e) }); }
 });
 
@@ -4053,13 +4053,13 @@ app.get("/api/adaccounts/:actId/details", async (req, res) => {
     let account = null;
     try {
       account = await fb(`/${accountId}`, "GET", {
-        fields: "id,account_id,name,currency,status,timezone_name"
+        fields: "id,account_id,name,currency,timezone_name,account_status"
       });
     } catch (accountErr) {
       console.error(`[Account Details] Error fetching account ${accountId}:`, accountErr.message);
       // If account fetch fails, try to get basic info from adaccounts list
       try {
-        const accounts = await fb(`/me/adaccounts`, "GET", { fields: "id,account_id,name,currency,status" });
+        const accounts = await fb(`/me/adaccounts`, "GET", { fields: "id,account_id,name,currency,account_status" });
         const foundAccount = accounts.data?.find(a => (a.id || a.account_id) === accountId);
         if (foundAccount) {
           account = foundAccount;
