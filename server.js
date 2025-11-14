@@ -572,8 +572,9 @@ function buildSystemPrompt(companyContext) {
 
 const app = express();
 
-// JSON parser for all routes
-app.use(express.json());
+// JSON parser for all routes - increased limit for large base64 image data
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // Allow only your website to call the API
 const origins = (process.env.ALLOWED_ORIGINS || "").split(",").map(s => s.trim()).filter(Boolean);
@@ -6772,7 +6773,7 @@ function addMediaRoutesDirectly() {
   });
   
   // Composite scene generation endpoint using Gemini API
-  app.post("/api/media/composite", requireAdminKey, async (req, res) => {
+  app.post("/api/media/composite", requireAdminKey, express.json({ limit: '50mb' }), async (req, res) => {
     console.log("[Composite API] Request received");
     try {
       const { prompt, referenceImages, aspectRatio } = req.body;
@@ -6855,7 +6856,7 @@ function addMediaRoutesDirectly() {
   });
   
   // Video generation endpoint using Veo 3
-  app.post("/api/media/video", requireAdminKey, async (req, res) => {
+  app.post("/api/media/video", requireAdminKey, express.json({ limit: '50mb' }), async (req, res) => {
     console.log("[Video API] Request received");
     try {
       const { prompt, imageUrl, aspectRatio, durationSec, quality } = req.body;
