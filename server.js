@@ -5663,6 +5663,62 @@ function addMediaRoutesDirectly() {
     });
   });
   
+  // Upload image endpoint - accepts base64 or multipart
+  app.post("/api/media/upload", requireAdminKey, express.json({ limit: '50mb' }), async (req, res) => {
+    try {
+      // Check if it's base64 data
+      if (req.body.imageData) {
+        const base64Data = req.body.imageData.replace(/^data:image\/\w+;base64,/, '');
+        const buffer = Buffer.from(base64Data, 'base64');
+        
+        // Generate unique filename
+        const timestamp = Date.now();
+        const randomStr = Math.random().toString(36).substring(2, 15);
+        const ext = req.body.format || 'jpg';
+        const filename = `upload_${timestamp}_${randomStr}.${ext}`;
+        
+        // Save to uploads directory
+        const uploadsDir = path.join(__dirname, 'uploads');
+        if (!fs.existsSync(uploadsDir)) {
+          fs.mkdirSync(uploadsDir, { recursive: true });
+        }
+        
+        const filepath = path.join(uploadsDir, filename);
+        fs.writeFileSync(filepath, buffer);
+        
+        // Return URL
+        const baseUrl = process.env.API_URL || `https://marom-meta-backend.onrender.com`;
+        const imageUrl = `${baseUrl}/uploads/${filename}`;
+        
+        return res.json({
+          success: true,
+          url: imageUrl,
+          imageUrl: imageUrl,
+          filename: filename
+        });
+      }
+      
+      // If no base64 data, return error
+      res.status(400).json({
+        success: false,
+        error: "Please send image as base64 in imageData field"
+      });
+    } catch (error) {
+      console.error("[Media Upload] Error:", error);
+      res.status(500).json({
+        success: false,
+        error: error.message || "Upload failed"
+      });
+    }
+  });
+  
+  // Serve uploaded files
+  const uploadsDir = path.join(__dirname, 'uploads');
+  if (!fs.existsSync(uploadsDir)) {
+    fs.mkdirSync(uploadsDir, { recursive: true });
+  }
+  app.use('/uploads', express.static(uploadsDir));
+  
   // Image generation endpoint
   app.post("/api/media/create", requireAdminKey, async (req, res) => {
     console.log("[Media API] Direct route handler called");
