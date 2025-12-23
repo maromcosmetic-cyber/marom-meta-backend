@@ -3570,6 +3570,33 @@ async function openaiWithFallback(config) {
   }
 }
 
+// Helper function to generate AI chat responses
+async function generateAIResponse({ system, user }) {
+  try {
+    const messages = [];
+    
+    if (system) {
+      messages.push({ role: "system", content: system });
+    }
+    
+    if (user) {
+      messages.push({ role: "user", content: user });
+    }
+    
+    const completion = await openaiWithFallback({
+      model: "gpt-4o-mini",
+      messages: messages,
+      temperature: 0.7,
+      max_tokens: 500
+    });
+    
+    return completion.choices[0].message.content;
+  } catch (err) {
+    console.error("[AI Chat] Error generating response:", err);
+    throw err;
+  }
+}
+
 // AI Prompt Enhancer - Creates optimized prompts using brand/product data
 async function enhanceImagePrompt(userPrompt, product, companyContext, session, angle = null, style = null) {
   try {
@@ -5212,6 +5239,52 @@ app.post("/api/company/context", (req, res) => {
     res.json({ success: true, context: updatedContext });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// Chat API endpoint for Marom virtual assistant
+app.post("/api/chat", async (req, res) => {
+  try {
+    const { message } = req.body;
+
+    // 1. Validate input
+    if (!message || typeof message !== "string") {
+      return res.status(400).json({
+        error: "Message is required"
+      });
+    }
+
+    // 2. System prompt (VERY IMPORTANT)
+    const systemPrompt = `
+You are Marom's virtual assistant.
+
+Rules:
+- You help website visitors with questions about hair loss, scalp care, and Marom products.
+- Marom products are natural and moringa-based.
+- Be supportive, calm, and easy to understand.
+- Do NOT give medical advice or diagnoses.
+- Do NOT talk about campaigns, ads, dashboards, internal tools, or analytics.
+- If unsure, give general, gentle guidance and suggest exploring Marom products.
+`;
+
+    // 3. Call your existing AI setup
+    // ⬇️ IMPORTANT:
+    // Use THE SAME AI CLIENT you already use in /api/media/create
+    const aiResponse = await generateAIResponse({
+      system: systemPrompt,
+      user: message
+    });
+
+    // 4. Return answer to frontend
+    return res.json({
+      reply: aiResponse
+    });
+
+  } catch (error) {
+    console.error("Chat API error:", error);
+    return res.status(500).json({
+      error: "Chat service unavailable"
+    });
   }
 });
 
