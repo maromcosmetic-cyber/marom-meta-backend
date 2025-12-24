@@ -5254,28 +5254,139 @@ app.post("/api/chat", async (req, res) => {
       });
     }
 
-    // 2. System prompt (VERY IMPORTANT)
-    const systemPrompt = `
-You are Marom's virtual assistant.
+    // 2. Load company context and product information
+    const companyContext = loadCompanyContext();
+    const lowerMessage = message.toLowerCase();
+    
+    // 3. Detect product-related queries and fetch relevant products
+    let productContext = "";
+    let relevantProducts = [];
+    
+    // Check if message mentions products, prices, or specific product names
+    const productKeywords = [
+      "product", "products", "price", "prices", "cost", "buy", "purchase", 
+      "shampoo", "conditioner", "oil", "serum", "treatment", "hair care",
+      "what products", "which product", "show me", "tell me about", 
+      "do you have", "what do you sell", "catalog", "store", "shop"
+    ];
+    const isProductQuery = productKeywords.some(keyword => lowerMessage.includes(keyword));
+    
+    if (isProductQuery) {
+      try {
+        // Try to find specific product mentioned in message
+        const productNameMatch = message.match(/(?:shampoo|conditioner|oil|serum|treatment|product)\s+([^?.,!]+)/i);
+        if (productNameMatch) {
+          const searchTerm = productNameMatch[1].trim();
+          const product = await findProductByName(searchTerm, true);
+          if (product) {
+            relevantProducts.push(product);
+          }
+        }
+        
+        // If no specific product found, search for products matching keywords
+        if (relevantProducts.length === 0) {
+          const searchTerms = ["shampoo", "conditioner", "oil", "serum", "treatment", "moringa"];
+          for (const term of searchTerms) {
+            if (lowerMessage.includes(term)) {
+              const products = await getProductsCache();
+              const matching = products
+                .filter(p => {
+                  const name = (p.name || "").toLowerCase();
+                  const desc = ((p.short_description || p.description || "")).toLowerCase();
+                  return name.includes(term) || desc.includes(term);
+                })
+                .slice(0, 5)
+                .map(normalizeProduct);
+              relevantProducts.push(...matching);
+              break;
+            }
+          }
+        }
+        
+        // If still no products, get a few popular products (for general product queries)
+        if (relevantProducts.length === 0) {
+          const products = await getProductsCache();
+          // Get up to 8 products for general queries
+          relevantProducts = products.slice(0, 8).map(normalizeProduct);
+        }
+        
+        // Build product context string
+        if (relevantProducts.length > 0) {
+          // Helper to strip HTML and clean text
+          const stripHtml = (html) => {
+            if (!html) return "";
+            return String(html)
+              .replace(/<[^>]*>/g, "")
+              .replace(/&nbsp;/g, " ")
+              .replace(/&amp;/g, "&")
+              .replace(/&lt;/g, "<")
+              .replace(/&gt;/g, ">")
+              .replace(/&quot;/g, '"')
+              .replace(/&#39;/g, "'")
+              .trim();
+          };
+          
+          productContext = "\n\nAVAILABLE PRODUCTS:\n";
+          relevantProducts.forEach((product, idx) => {
+            productContext += `\n${idx + 1}. ${product.name}`;
+            if (product.price && product.price !== "0") {
+              productContext += ` - $${product.price}`;
+              if (product.sale_price && product.sale_price !== product.price) {
+                productContext += ` (Sale: $${product.sale_price})`;
+              }
+            }
+            if (product.short_description) {
+              const desc = stripHtml(product.short_description).substring(0, 150);
+              if (desc) {
+                productContext += `\n   Description: ${desc}${desc.length >= 150 ? '...' : ''}`;
+              }
+            } else if (product.description) {
+              const desc = stripHtml(product.description).substring(0, 150);
+              if (desc) {
+                productContext += `\n   Description: ${desc}${desc.length >= 150 ? '...' : ''}`;
+              }
+            }
+            if (product.permalink) {
+              productContext += `\n   View: ${product.permalink}`;
+            }
+          });
+        }
+      } catch (err) {
+        console.error("[Chat] Error fetching products:", err.message);
+        // Continue without product context if fetch fails
+      }
+    }
+    
+    // 4. Build enhanced system prompt with company and product context
+    let systemPrompt = `You are Marom's virtual assistant helping website visitors.
 
-Rules:
-- You help website visitors with questions about hair loss, scalp care, and Marom products.
+COMPANY INFORMATION:
+- Brand: ${companyContext.name || "MAROM"}
+- Industry: ${companyContext.industry || "Natural Hair Care & Cosmetics"}
+${companyContext.brandValues ? `- Brand Values: ${companyContext.brandValues}` : ""}
+${companyContext.targetAudience ? `- Target Audience: ${companyContext.targetAudience}` : ""}
+
+${productContext}
+
+RULES:
+- You help visitors with questions about hair loss, scalp care, and Marom products.
 - Marom products are natural and moringa-based.
 - Be supportive, calm, and easy to understand.
-- Do NOT give medical advice or diagnoses.
+- When mentioning products, include prices and brief descriptions if available.
+- Do NOT give medical advice or diagnoses. No "treat/cure/prevent" claims.
 - Do NOT talk about campaigns, ads, dashboards, internal tools, or analytics.
+- If someone asks about products, provide specific information from the product list above.
+- If asked about prices, use the exact prices from the product information.
 - If unsure, give general, gentle guidance and suggest exploring Marom products.
-`;
+- Keep answers concise and helpful (2-3 sentences when possible).`;
 
-    // 3. Call your existing AI setup
-    // ⬇️ IMPORTANT:
-    // Use THE SAME AI CLIENT you already use in /api/media/create
+    // 5. Call AI with enhanced context
     const aiResponse = await generateAIResponse({
       system: systemPrompt,
       user: message
     });
 
-    // 4. Return answer to frontend
+    // 6. Return answer to frontend
     return res.json({
       reply: aiResponse
     });
