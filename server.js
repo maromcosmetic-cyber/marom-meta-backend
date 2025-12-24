@@ -5526,7 +5526,7 @@ app.post("/api/company/context", (req, res) => {
 // Chat API endpoint for Marom virtual assistant
 app.post("/api/chat", async (req, res) => {
   try {
-    const { message } = req.body;
+    const { message, pageContext } = req.body;
 
     // 1. Validate input
     if (!message || typeof message !== "string") {
@@ -5538,6 +5538,78 @@ app.post("/api/chat", async (req, res) => {
     // 2. Load company context and product information
     const companyContext = loadCompanyContext();
     const lowerMessage = message.toLowerCase();
+    
+    // 2.5. Handle page context - detect what page user is on
+    let pageInfo = "";
+    let currentProduct = null;
+    
+    if (pageContext) {
+      try {
+        // If user is on a product page, fetch that product
+        if (pageContext.isProduct && pageContext.productId) {
+          try {
+            const productData = await wooFetch("GET", `/products/${pageContext.productId}`);
+            if (productData && productData.id) {
+              currentProduct = normalizeProduct(productData);
+              
+              // Helper to strip HTML
+              const stripHtml = (html) => {
+                if (!html) return "";
+                return String(html)
+                  .replace(/<[^>]*>/g, "")
+                  .replace(/&nbsp;/g, " ")
+                  .replace(/&amp;/g, "&")
+                  .replace(/&lt;/g, "<")
+                  .replace(/&gt;/g, ">")
+                  .replace(/&quot;/g, '"')
+                  .replace(/&#39;/g, "'")
+                  .trim();
+              };
+              
+              pageInfo = `\n\nUSER IS CURRENTLY VIEWING:\n` +
+                        `Product: ${currentProduct.name}\n` +
+                        `Price: $${currentProduct.price}${currentProduct.sale_price && currentProduct.sale_price !== currentProduct.price ? ` (Sale: $${currentProduct.sale_price})` : ''}\n` +
+                        `Description: ${stripHtml(currentProduct.short_description || currentProduct.description || '').substring(0, 300)}${(currentProduct.short_description || currentProduct.description || '').length > 300 ? '...' : ''}\n` +
+                        `URL: ${pageContext.url}\n` +
+                        `\nIMPORTANT: The user is viewing this specific product. When they ask questions like "tell me more", "is this good for...", "what's the price", or "can I use this", they are referring to THIS product. Reference it directly in your response.`;
+            }
+          } catch (err) {
+            console.error("[Chat] Error fetching product from page context:", err.message);
+            // Fallback to product name if available
+            if (pageContext.productName) {
+              pageInfo = `\n\nUSER IS CURRENTLY VIEWING:\n` +
+                        `Product: ${pageContext.productName}\n` +
+                        `URL: ${pageContext.url}\n` +
+                        `\nThe user is viewing this product page. Reference it in your response.`;
+            }
+          }
+        } else if (pageContext.isCart || pageContext.isCart === true) {
+          pageInfo = `\n\nUSER IS CURRENTLY ON: Shopping Cart / Checkout page.\n` +
+                    `They may need help with:\n` +
+                    `- Checkout process\n` +
+                    `- Shipping questions\n` +
+                    `- Payment methods\n` +
+                    `- Order modifications\n` +
+                    `- Adding/removing items\n` +
+                    `URL: ${pageContext.url}`;
+        } else if (pageContext.isCategory && pageContext.category) {
+          pageInfo = `\n\nUSER IS CURRENTLY BROWSING: ${pageContext.category} category.\n` +
+                    `They may be interested in products in this category.\n` +
+                    `URL: ${pageContext.url}`;
+        } else if (pageContext.isShop) {
+          pageInfo = `\n\nUSER IS CURRENTLY ON: Shop page.\n` +
+                    `They are browsing the product catalog.\n` +
+                    `URL: ${pageContext.url}`;
+        } else if (pageContext.pathname) {
+          // Generic page context
+          pageInfo = `\n\nUSER IS CURRENTLY ON: ${pageContext.title || pageContext.pathname}\n` +
+                    `URL: ${pageContext.url}`;
+        }
+      } catch (err) {
+        console.error("[Chat] Error processing page context:", err.message);
+        // Continue without page context if processing fails
+      }
+    }
     
     // 3. Detect legal document queries and load relevant documents
     let legalContext = "";
@@ -5660,6 +5732,11 @@ app.post("/api/chat", async (req, res) => {
     let productContext = "";
     let relevantProducts = [];
     
+    // If user is on a product page, prioritize that product
+    if (currentProduct) {
+      relevantProducts.push(currentProduct);
+    }
+    
     // Check if message mentions products, prices, or specific product names
     const productKeywords = [
       "product", "products", "price", "prices", "cost", "buy", "purchase", 
@@ -5669,7 +5746,7 @@ app.post("/api/chat", async (req, res) => {
     ];
     const isProductQuery = productKeywords.some(keyword => lowerMessage.includes(keyword));
     
-    if (isProductQuery) {
+    if (isProductQuery && !currentProduct) {
       try {
         // Try to find specific product mentioned in message
         const productNameMatch = message.match(/(?:shampoo|conditioner|oil|serum|treatment|product)\s+([^?.,!]+)/i);
@@ -5755,7 +5832,7 @@ app.post("/api/chat", async (req, res) => {
       }
     }
     
-    // 5. Build enhanced system prompt with company, product, and legal context
+    // 5. Build enhanced system prompt with company, product, legal, and page context
     let systemPrompt = `You are Marom's virtual assistant helping website visitors.
 
 COMPANY INFORMATION:
@@ -5763,6 +5840,8 @@ COMPANY INFORMATION:
 - Industry: ${companyContext.industry || "Natural Hair Care & Cosmetics"}
 ${companyContext.brandValues ? `- Brand Values: ${companyContext.brandValues}` : ""}
 ${companyContext.targetAudience ? `- Target Audience: ${companyContext.targetAudience}` : ""}
+
+${pageInfo}
 
 ${productContext}
 
@@ -5772,6 +5851,7 @@ RULES:
 - You help visitors with questions about hair loss, scalp care, and Marom products.
 - Marom products are natural and moringa-based.
 - Be supportive, calm, and easy to understand.
+${currentProduct ? `- CRITICAL: The user is currently viewing the product "${currentProduct.name}" on the product page. When they ask questions like "tell me more", "is this good for...", "what's the price", "can I use this", or any product-related question, they are referring to THIS specific product. Always reference it directly.` : ''}
 - When mentioning products, include prices and brief descriptions if available.
 - When answering legal questions, use the exact information from the legal documents provided above.
 - For legal questions, be accurate and refer to the specific policy or terms document.
