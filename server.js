@@ -5190,10 +5190,41 @@ app.get("/api/legal/urls", (req, res) => {
   }
 });
 
+// Test endpoint for legal URLs
+app.get("/api/legal/test", (req, res) => {
+  res.json({ 
+    success: true, 
+    message: "Legal endpoints are working",
+    endpoints: {
+      "GET /api/legal/urls": "Get current legal document URLs",
+      "POST /api/legal/urls": "Update legal document URLs"
+    }
+  });
+});
+
 // Update legal document URLs
-app.post("/api/legal/urls", requireAdminKey, async (req, res) => {
+app.post("/api/legal/urls", async (req, res) => {
+  console.log("[Legal URLs] POST request received");
   try {
+    // Optional admin key check (only if ADMIN_DASH_KEY is set)
+    const ADMIN_DASH_KEY = process.env.ADMIN_DASH_KEY;
+    if (ADMIN_DASH_KEY) {
+      const providedKey = req.headers["x-admin-key"];
+      if (!providedKey || providedKey !== ADMIN_DASH_KEY) {
+        console.log("[Legal URLs] Unauthorized - missing or invalid admin key");
+        return res.status(401).json({ 
+          success: false,
+          error: "Unauthorized. Missing or invalid x-admin-key header." 
+        });
+      }
+    }
+    
     const { legalDocuments, website } = req.body;
+    console.log("[Legal URLs] Updating with:", { 
+      hasLegalDocs: !!legalDocuments, 
+      website: website || "not provided" 
+    });
+    
     const context = loadCompanyContext();
     
     if (legalDocuments) {
@@ -5213,6 +5244,7 @@ app.post("/api/legal/urls", requireAdminKey, async (req, res) => {
     legalDocsCache = {};
     legalDocsCacheTimestamp = 0;
     
+    console.log("[Legal URLs] Successfully updated legal document URLs");
     res.json({
       success: true,
       message: "Legal document URLs updated",
@@ -5220,7 +5252,12 @@ app.post("/api/legal/urls", requireAdminKey, async (req, res) => {
       website: context.website
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error("[Legal URLs] Error updating:", err);
+    console.error("[Legal URLs] Error stack:", err.stack);
+    res.status(500).json({ 
+      success: false,
+      error: err.message 
+    });
   }
 });
 
@@ -5504,57 +5541,85 @@ app.post("/api/chat", async (req, res) => {
     
     // 3. Detect legal document queries and load relevant documents
     let legalContext = "";
+    let policyLinks = []; // Track which policy URLs to include in response
     const isLegal = isLegalQuery(message);
     if (isLegal) {
       try {
         const legalDocs = await loadLegalDocuments();
+        const companyContext = loadCompanyContext();
+        const legalURLs = companyContext.legalDocuments || {};
+        const websiteBase = companyContext.website || "https://maromcosmetic.com";
+        
         if (Object.keys(legalDocs).length > 0) {
           legalContext = "\n\nLEGAL DOCUMENTS:\n";
+          
+          // Helper to get policy URL
+          const getPolicyURL = (urlKey, defaultPath) => {
+            return legalURLs[urlKey] || legalURLs[urlKey.toLowerCase()] || (websiteBase.replace(/\/$/, '') + defaultPath);
+          };
           
           // Add relevant documents based on query
           if (lowerMessage.includes("terms") || lowerMessage.includes("tos") || lowerMessage.includes("agreement")) {
             if (legalDocs.terms) {
+              const url = getPolicyURL("termsOfService", "/terms-and-conditions/");
               legalContext += `\nTERMS OF SERVICE:\n${legalDocs.terms.substring(0, 2000)}${legalDocs.terms.length > 2000 ? '...' : ''}\n`;
+              policyLinks.push({ name: "Terms of Service", url });
             }
           }
           if (lowerMessage.includes("privacy") || lowerMessage.includes("data") || lowerMessage.includes("gdpr")) {
             if (legalDocs.privacy) {
+              const url = getPolicyURL("privacyPolicy", "/marom-privacy-policy/");
               legalContext += `\nPRIVACY POLICY:\n${legalDocs.privacy.substring(0, 2000)}${legalDocs.privacy.length > 2000 ? '...' : ''}\n`;
+              policyLinks.push({ name: "Privacy Policy", url });
             }
           }
           if (lowerMessage.includes("refund") || lowerMessage.includes("money back")) {
             if (legalDocs.refund) {
+              const url = getPolicyURL("refundPolicy", "/marom-return-refund-policy/");
               legalContext += `\nREFUND POLICY:\n${legalDocs.refund.substring(0, 2000)}${legalDocs.refund.length > 2000 ? '...' : ''}\n`;
+              policyLinks.push({ name: "Refund Policy", url });
             }
           }
           if (lowerMessage.includes("return") || lowerMessage.includes("exchange")) {
             if (legalDocs.return) {
+              const url = getPolicyURL("returnPolicy", "/marom-return-refund-policy/");
               legalContext += `\nRETURN POLICY:\n${legalDocs.return.substring(0, 2000)}${legalDocs.return.length > 2000 ? '...' : ''}\n`;
+              policyLinks.push({ name: "Return Policy", url });
             }
           }
           if (lowerMessage.includes("shipping") || lowerMessage.includes("delivery")) {
             if (legalDocs.shipping) {
+              const url = getPolicyURL("shippingPolicy", "/shipping-delivery-policy/");
               legalContext += `\nSHIPPING POLICY:\n${legalDocs.shipping.substring(0, 2000)}${legalDocs.shipping.length > 2000 ? '...' : ''}\n`;
+              policyLinks.push({ name: "Shipping Policy", url });
             }
           }
           if (lowerMessage.includes("cookie")) {
             if (legalDocs.cookies) {
+              const url = getPolicyURL("cookiePolicy", "/marom-cookies-policy/");
               legalContext += `\nCOOKIE POLICY:\n${legalDocs.cookies.substring(0, 2000)}${legalDocs.cookies.length > 2000 ? '...' : ''}\n`;
+              policyLinks.push({ name: "Cookie Policy", url });
             }
           }
           if (lowerMessage.includes("payment") || lowerMessage.includes("pay") || lowerMessage.includes("payment method") || lowerMessage.includes("payment options")) {
             if (legalDocs.payment) {
+              const url = getPolicyURL("paymentPolicy", "/payment-policy/");
               legalContext += `\nPAYMENT POLICY:\n${legalDocs.payment.substring(0, 2000)}${legalDocs.payment.length > 2000 ? '...' : ''}\n`;
+              policyLinks.push({ name: "Payment Policy", url });
             }
           }
           if (lowerMessage.includes("company") || lowerMessage.includes("company details") || lowerMessage.includes("about company") || lowerMessage.includes("company info")) {
             if (legalDocs.company) {
+              const url = getPolicyURL("companyDetails", "/company-details/");
               legalContext += `\nCOMPANY DETAILS:\n${legalDocs.company.substring(0, 2000)}${legalDocs.company.length > 2000 ? '...' : ''}\n`;
+              policyLinks.push({ name: "Company Details", url });
             }
           }
           if (lowerMessage.includes("accessibility") || lowerMessage.includes("a11y")) {
             if (legalDocs.accessibility) {
+              const url = getPolicyURL("accessibilityStatement", "/accessibility-statement/");
               legalContext += `\nACCESSIBILITY STATEMENT:\n${legalDocs.accessibility.substring(0, 2000)}${legalDocs.accessibility.length > 2000 ? '...' : ''}\n`;
+              policyLinks.push({ name: "Accessibility Statement", url });
             }
           }
           
@@ -5567,6 +5632,21 @@ app.post("/api/chat", async (req, res) => {
             Object.entries(legalDocs).forEach(([name, content]) => {
               const docName = name.charAt(0).toUpperCase() + name.slice(1).replace(/([A-Z])/g, ' $1');
               legalContext += `\n${docName.toUpperCase()} POLICY:\n${content.substring(0, 1500)}${content.length > 1500 ? '...' : ''}\n`;
+              
+              // Add URL for general queries
+              const urlMap = {
+                terms: getPolicyURL("termsOfService", "/terms-and-conditions/"),
+                privacy: getPolicyURL("privacyPolicy", "/marom-privacy-policy/"),
+                refund: getPolicyURL("refundPolicy", "/marom-return-refund-policy/"),
+                return: getPolicyURL("returnPolicy", "/marom-return-refund-policy/"),
+                shipping: getPolicyURL("shippingPolicy", "/shipping-delivery-policy/"),
+                cookies: getPolicyURL("cookiePolicy", "/marom-cookies-policy/"),
+                payment: getPolicyURL("paymentPolicy", "/payment-policy/"),
+                company: getPolicyURL("companyDetails", "/company-details/"),
+                accessibility: getPolicyURL("accessibilityStatement", "/accessibility-statement/")
+              };
+              const url = urlMap[name] || (websiteBase.replace(/\/$/, '') + `/${name}-policy/`);
+              policyLinks.push({ name: docName, url });
             });
           }
         }
@@ -5695,6 +5775,7 @@ RULES:
 - When mentioning products, include prices and brief descriptions if available.
 - When answering legal questions, use the exact information from the legal documents provided above.
 - For legal questions, be accurate and refer to the specific policy or terms document.
+- IMPORTANT: When answering legal/policy questions, always mention that the user can read the full policy document on the website. Include the policy URL in your response so users can access the complete information.
 - Do NOT give medical advice or diagnoses. No "treat/cure/prevent" claims.
 - Do NOT talk about campaigns, ads, dashboards, internal tools, or analytics.
 - If someone asks about products, provide specific information from the product list above.
@@ -5704,14 +5785,22 @@ RULES:
 - Keep answers concise and helpful (2-3 sentences when possible, but legal questions may require more detail).`;
 
     // 6. Call AI with enhanced context
-    const aiResponse = await generateAIResponse({
+    let aiResponse = await generateAIResponse({
       system: systemPrompt,
       user: message
     });
 
-    // 7. Return answer to frontend
+    // 7. Append policy links to response if legal query
+    if (isLegal && policyLinks.length > 0) {
+      // Add policy links to the response text so they appear as clickable buttons
+      const linksText = policyLinks.map(link => link.url).join('\n');
+      aiResponse += `\n\nFor the complete policy document, visit: ${linksText}`;
+    }
+
+    // 8. Return answer to frontend with policy links metadata
     return res.json({
-      reply: aiResponse
+      reply: aiResponse,
+      ...(policyLinks.length > 0 && { policyLinks: policyLinks })
     });
 
   } catch (error) {
