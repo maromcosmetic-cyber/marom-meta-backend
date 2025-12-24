@@ -6264,6 +6264,22 @@ Make it feel personal and tailored to their specific situation, not generic. Ref
           console.error(`[Quiz] Failed to send email to ${email}:`, err.message);
           // Don't throw - email failure shouldn't break quiz results
         });
+
+        // Also register email in Google Sheets (same as subscribe form)
+        const googleSheetsUrl = 'https://script.google.com/macros/s/AKfycbwaIopgdPvWP-ExihYx0qyC6tySRw-9LIRmVV7pnFyxAiUfQO0M1FSqcONLVmSHht4p6Q/exec';
+        const formData = new URLSearchParams();
+        formData.append('email', email.trim());
+        formData.append('source', 'Quiz Results');
+        
+        axios.post(googleSheetsUrl, formData.toString(), {
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          timeout: 10000
+        }).then(() => {
+          console.log(`[Quiz] Email registered in Google Sheets: ${email}`);
+        }).catch((err) => {
+          console.error(`[Quiz] Failed to register email in Google Sheets: ${err.message}`);
+          // Don't throw - Google Sheets failure shouldn't break quiz results
+        });
       } catch (err) {
         console.error("[Quiz] Error preparing email:", err.message);
         // Continue even if email setup fails
