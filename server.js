@@ -5891,6 +5891,345 @@ ${currentProduct ? `- CRITICAL: The user is currently viewing the product "${cur
   }
 });
 
+// Quiz Analysis endpoint - AI-powered hair loss quiz results
+app.post("/api/quiz/analyze", async (req, res) => {
+  try {
+    const { answers, goal, email } = req.body;
+
+    if (!answers || typeof answers !== "object") {
+      return res.status(400).json({
+        error: "Quiz answers are required"
+      });
+    }
+
+    // Load company context and products
+    const companyContext = loadCompanyContext();
+    let products = [];
+    try {
+      products = await getProductsCache();
+    } catch (err) {
+      console.error("[Quiz] Error loading products:", err.message);
+    }
+
+    // Build product context for AI
+    let productContext = "";
+    if (products.length > 0) {
+      const stripHtml = (html) => {
+        if (!html) return "";
+        return String(html)
+          .replace(/<[^>]*>/g, "")
+          .replace(/&nbsp;/g, " ")
+          .replace(/&amp;/g, "&")
+          .replace(/&lt;/g, "<")
+          .replace(/&gt;/g, ">")
+          .replace(/&quot;/g, '"')
+          .replace(/&#39;/g, "'")
+          .trim();
+      };
+
+      productContext = "\n\nAVAILABLE MAROM PRODUCTS:\n";
+      products.slice(0, 15).forEach((product, idx) => {
+        const normalized = normalizeProduct(product);
+        productContext += `\n${idx + 1}. ${normalized.name}`;
+        if (normalized.price && normalized.price !== "0") {
+          productContext += ` - $${normalized.price}`;
+          if (normalized.sale_price && normalized.sale_price !== normalized.price) {
+            productContext += ` (Sale: $${normalized.sale_price})`;
+          }
+        }
+        if (normalized.short_description) {
+          const desc = stripHtml(normalized.short_description).substring(0, 120);
+          if (desc) {
+            productContext += `\n   Description: ${desc}${desc.length >= 120 ? '...' : ''}`;
+          }
+        }
+        if (normalized.permalink) {
+          productContext += `\n   URL: ${normalized.permalink}`;
+        }
+      });
+    }
+
+    // Build quiz answers summary
+    const answerSummary = Object.entries(answers)
+      .map(([step, data]) => {
+        const stepNum = parseInt(step, 10);
+        const questions = {
+          1: "When did you first notice more hair fall?",
+          2: "How does your scalp feel most days?",
+          3: "How often do you wash your hair?",
+          4: "Which feels most true right now?",
+          5: "Have you tried hair-loss treatments before?",
+          6: "How's your energy lately?",
+          7: "Are you in a postpartum period right now?",
+          8: "What's your #1 goal?"
+        };
+        return `Q${stepNum}: ${questions[stepNum] || `Question ${stepNum}`}\nAnswer: ${data.value || data}`;
+      })
+      .join("\n\n");
+
+    // Calculate pattern scores (for fallback)
+    const scores = { stress: 0, hormonal: 0, scalp: 0, structure: 0 };
+    Object.values(answers).forEach(answer => {
+      if (answer.tags) {
+        answer.tags.split(/\s+/).forEach(tag => {
+          if (scores[tag] !== undefined) scores[tag] += 1;
+        });
+      }
+    });
+    if (answers[7]?.value === "pp_yes") scores.hormonal += 2;
+    if (answers[1]?.value === "postpartum") scores.hormonal += 2;
+    if (answers[6]?.value === "exhausted") scores.stress += 1;
+
+    const primaryPattern = Object.keys(scores).reduce((a, b) => scores[a] > scores[b] ? a : b);
+
+    // Build AI prompt
+    const systemPrompt = `You are a compassionate hair care expert helping women understand their hair loss patterns and providing personalized, natural solutions.
+
+COMPANY INFORMATION:
+- Brand: ${companyContext.name || "MAROM"}
+- Industry: ${companyContext.industry || "Natural Hair Care & Cosmetics"}
+- Brand Values: ${companyContext.brandValues || "Natural ingredients, gentle care, holistic approach"}
+- Target Audience: ${companyContext.targetAudience || "Women experiencing hair loss, postpartum recovery, stress-related shedding"}
+
+${productContext}
+
+IMPORTANT RULES:
+- Be warm, supportive, and non-medical (no diagnoses or treatment claims)
+- Focus on natural, gentle approaches
+- Provide specific product recommendations from the available products list
+- Create personalized routines based on the user's specific answers
+- Explain the "why" behind recommendations
+- Keep language accessible and encouraging
+- Never make medical claims or promises of "cure"`;
+
+    const userPrompt = `Analyze this hair loss quiz and provide personalized results:
+
+QUIZ ANSWERS:
+${answerSummary}
+
+USER'S PRIMARY GOAL: ${goal || "Not specified"}
+
+Based on these answers, provide a comprehensive analysis in JSON format:
+{
+  "pattern": "Primary pattern (stress/hormonal/scalp/structure)",
+  "patternName": "User-friendly pattern name (e.g., 'Stress-related shedding')",
+  "title": "Personalized result title (2-6 words)",
+  "description": "Personalized explanation of what this pattern means for THIS user (2-3 sentences, based on their specific answers)",
+  "meaning": ["Insight 1 based on their answers", "Insight 2", "Insight 3"],
+  "plan": ["Step 1 personalized routine", "Step 2", "Step 3", "Step 4"],
+  "food": ["Nutrition tip 1", "Nutrition tip 2", "Nutrition tip 3", "Nutrition tip 4"],
+  "productRecommendations": [
+    {
+      "name": "Product name from available products",
+      "reason": "Why this product is perfect for this user (1 sentence)",
+      "url": "Product URL from available products"
+    }
+  ],
+  "personalizedInsights": "Additional personalized insights based on their specific combination of answers (2-3 sentences)"
+}
+
+Make it feel personal and tailored to their specific situation, not generic. Reference their specific answers when relevant.`;
+
+    // Call AI
+    const completion = await openaiWithFallback({
+      model: "gpt-4o-mini",
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt }
+      ],
+      response_format: { type: "json_object" },
+      temperature: 0.8,
+      max_tokens: 2000
+    });
+
+    let aiResult;
+    try {
+      aiResult = JSON.parse(completion.choices[0].message.content);
+    } catch (err) {
+      console.error("[Quiz] Error parsing AI response:", err);
+      // Fallback to basic pattern-based result
+      const fallbackResults = {
+        stress: {
+          patternName: "Stress Shedding Pattern",
+          title: "Stress-related shedding",
+          description: "Your answers point to a nervous-system pattern: when life is heavy, the hair cycle often pauses — and shedding shows up weeks later.",
+          meaning: [
+            "Shedding often appears 4–8 weeks after stress peaks",
+            "A tight, reactive scalp can reduce \"comfort\" for growth",
+            "Aggressive treatments can make shedding feel worse"
+          ],
+          plan: [
+            "Switch to gentle cleansing (focus on scalp comfort, not harsh foam)",
+            "Condition lengths consistently to reduce breakage confusion",
+            "Add a simple scalp-support step 3–4x/week (light, consistent)",
+            "Give the routine 6–8 weeks — consistency beats intensity"
+          ],
+          food: [
+            "Focus on iron-rich foods (spinach, lentils, lean red meat)",
+            "Add B-vitamin sources (eggs, whole grains, nuts)",
+            "Include magnesium-rich foods (dark leafy greens, almonds, seeds)",
+            "Stay hydrated — dehydration can worsen stress-related shedding"
+          ]
+        },
+        hormonal: {
+          patternName: "Hormonal Balance Pattern",
+          title: "Hormonal / postpartum shedding",
+          description: "This pattern is extremely common for women — especially postpartum or after a major body shift. The goal is gentle support, not \"shock\" treatments.",
+          meaning: [
+            "Postpartum shedding is often temporary (cycle reset)",
+            "Harsh routines can irritate the scalp during recovery",
+            "Your hair needs stability + nourishment over time"
+          ],
+          plan: [
+            "Keep cleansing gentle and consistent (avoid over-washing)",
+            "Condition lengths every wash (less breakage = less panic)",
+            "Add a scalp-support serum step on clean scalp",
+            "Be patient — hair cycles need time to normalize"
+          ],
+          food: [
+            "Prioritize protein (aim for 20-30g per meal)",
+            "Include omega-3s (salmon, walnuts, chia seeds)",
+            "Eat zinc-rich foods (pumpkin seeds, chickpeas, oysters)",
+            "Focus on iron + vitamin C combo (lentils with bell peppers)"
+          ]
+        },
+        scalp: {
+          patternName: "Scalp Sensitivity Pattern",
+          title: "Scalp imbalance & sensitivity",
+          description: "Your scalp signals suggest it needs calm. A comfortable scalp often supports a better environment for healthy-looking hair over time.",
+          meaning: [
+            "Itch/tightness often means the scalp barrier is stressed",
+            "Over-cleansing or heavy buildup can both trigger discomfort",
+            "Simplifying products can be a fast win"
+          ],
+          plan: [
+            "Use a gentle shampoo focused on scalp comfort",
+            "Massage lightly (no scratching) for 60 seconds",
+            "Condition lengths only (avoid heavy product at roots)",
+            "Add a light scalp step only if it feels soothing (not sticky)"
+          ],
+          food: [
+            "Reduce inflammatory foods (processed sugars, refined carbs)",
+            "Add anti-inflammatory foods (berries, fatty fish, turmeric, green tea)",
+            "Include biotin-rich foods (eggs, almonds, sweet potatoes)",
+            "Stay hydrated — dry scalp can feel tight and itchy"
+          ]
+        },
+        structure: {
+          patternName: "Hair Structure Pattern",
+          title: "Long-term weakness & breakage confusion",
+          description: "Some of what feels like \"hair loss\" can be breakage + dryness. Strength and moisture restore the look and feel quickly — and reduce shedding anxiety.",
+          meaning: [
+            "Breakage can look like hair loss (short hairs, rough ends)",
+            "Dry hair tangles more → more fall in the shower",
+            "A consistent conditioning routine is key"
+          ],
+          plan: [
+            "Cleanse gently — don't strip and then over-compensate",
+            "Condition every wash and detangle softly",
+            "Use a light leave-on/scalp support step if desired",
+            "Take photos every 2 weeks (progress is easier to see)"
+          ],
+          food: [
+            "Prioritize collagen-building nutrients (vitamin C + protein)",
+            "Include silica-rich foods (cucumbers, bell peppers, oats)",
+            "Eat healthy fats (avocado, olive oil, nuts) for moisture from within",
+            "Add sulfur-rich foods (garlic, onions, cruciferous vegetables)"
+          ]
+        }
+      };
+
+      const fallback = fallbackResults[primaryPattern] || fallbackResults.stress;
+      aiResult = {
+        pattern: primaryPattern,
+        ...fallback,
+        productRecommendations: [],
+        personalizedInsights: ""
+      };
+    }
+
+    // Match products from catalog
+    const recommendedProducts = [];
+    if (aiResult.productRecommendations && Array.isArray(aiResult.productRecommendations)) {
+      for (const rec of aiResult.productRecommendations) {
+        if (rec.name) {
+          const matched = await findProductByName(rec.name, true);
+          if (matched) {
+            recommendedProducts.push({
+              name: matched.name,
+              price: matched.price,
+              sale_price: matched.sale_price,
+              permalink: matched.permalink,
+              image: matched.image || null,
+              reason: rec.reason || "Recommended for your hair pattern"
+            });
+          }
+        }
+      }
+    }
+
+    // If no AI recommendations, suggest products based on pattern
+    if (recommendedProducts.length === 0) {
+      const patternKeywords = {
+        stress: ["scalp", "serum", "gentle"],
+        hormonal: ["oil", "nourish", "strength"],
+        scalp: ["shampoo", "gentle", "scalp"],
+        structure: ["conditioner", "moisture", "strength"]
+      };
+
+      const keywords = patternKeywords[primaryPattern] || ["hair", "care"];
+      for (const keyword of keywords) {
+        const matching = products
+          .filter(p => {
+            const name = (p.name || "").toLowerCase();
+            const desc = ((p.short_description || p.description || "")).toLowerCase();
+            return name.includes(keyword) || desc.includes(keyword);
+          })
+          .slice(0, 2)
+          .map(normalizeProduct);
+
+        for (const product of matching) {
+          if (recommendedProducts.length >= 3) break;
+          if (!recommendedProducts.find(p => p.name === product.name)) {
+            recommendedProducts.push({
+              name: product.name,
+              price: product.price,
+              sale_price: product.sale_price,
+              permalink: product.permalink,
+              image: product.image || null,
+              reason: `Perfect for ${primaryPattern}-related hair concerns`
+            });
+          }
+        }
+        if (recommendedProducts.length >= 3) break;
+      }
+    }
+
+    // Return results
+    return res.json({
+      success: true,
+      result: {
+        pattern: aiResult.pattern || primaryPattern,
+        patternName: aiResult.patternName || "Hair Loss Pattern",
+        title: aiResult.title || "Your Hair Analysis",
+        description: aiResult.description || "",
+        meaning: aiResult.meaning || [],
+        plan: aiResult.plan || [],
+        food: aiResult.food || [],
+        personalizedInsights: aiResult.personalizedInsights || "",
+        products: recommendedProducts
+      }
+    });
+
+  } catch (error) {
+    console.error("[Quiz] Analysis error:", error);
+    return res.status(500).json({
+      error: "Failed to analyze quiz results",
+      message: error.message
+    });
+  }
+});
+
 // AI Enhancement endpoint for company profile
 app.post("/api/company/enhance-with-ai", async (req, res) => {
   try {
