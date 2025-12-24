@@ -32,6 +32,7 @@ const DATA_DIR = path.join(__dirname, "data");
 const COMPANY_FILE = path.join(MEMORY_DIR, "company.json");
 const CONVERSATIONS_FILE = path.join(MEMORY_DIR, "conversations.json");
 const AUDIENCES_FILE = path.join(DATA_DIR, "audiences.json");
+const LEGAL_DIR = path.join(MEMORY_DIR, "legal");
 
 // Ensure memory and data directories exist
 if (!fs.existsSync(MEMORY_DIR)) {
@@ -39,6 +40,9 @@ if (!fs.existsSync(MEMORY_DIR)) {
 }
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
+}
+if (!fs.existsSync(LEGAL_DIR)) {
+  fs.mkdirSync(LEGAL_DIR, { recursive: true });
 }
 
 // Load company context
@@ -103,6 +107,197 @@ function saveConversation(userMessage, aiResponse) {
     console.error("Error saving conversation:", err);
     return false;
   }
+}
+
+// Legal document cache
+let legalDocsCache = {};
+let legalDocsCacheTimestamp = 0;
+const LEGAL_DOCS_CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours
+
+// Extract text content from HTML
+function extractTextFromHTML(html) {
+  if (!html) return "";
+  
+  // Remove script and style tags
+  let text = html.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '');
+  text = text.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '');
+  
+  // Extract main content areas
+  const contentSelectors = [
+    /<main[^>]*>([\s\S]*?)<\/main>/i,
+    /<article[^>]*>([\s\S]*?)<\/article>/i,
+    /<div[^>]*class="[^"]*content[^"]*"[^>]*>([\s\S]*?)<\/div>/i,
+    /<div[^>]*id="[^"]*content[^"]*"[^>]*>([\s\S]*?)<\/div>/i,
+    /<body[^>]*>([\s\S]*?)<\/body>/i
+  ];
+  
+  let content = "";
+  for (const selector of contentSelectors) {
+    const match = html.match(selector);
+    if (match && match[1]) {
+      content = match[1];
+      break;
+    }
+  }
+  
+  if (!content) {
+    content = html;
+  }
+  
+  // Remove HTML tags
+  content = content.replace(/<[^>]+>/g, ' ');
+  
+  // Decode HTML entities
+  content = content
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&apos;/g, "'");
+  
+  // Clean up whitespace
+  content = content.replace(/\s+/g, ' ').trim();
+  
+  return content;
+}
+
+// Fetch legal document from website URL
+async function fetchLegalDocumentFromURL(url) {
+  try {
+    const response = await axios.get(url, {
+      timeout: 15000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+      }
+    });
+    
+    const html = response.data;
+    const textContent = extractTextFromHTML(html);
+    
+    return textContent;
+  } catch (err) {
+    console.error(`[Legal] Error fetching ${url}:`, err.message);
+    return null;
+  }
+}
+
+// Load legal documents from website URLs or local files
+async function loadLegalDocuments() {
+  const now = Date.now();
+  
+  // Return cached documents if still valid
+  if (legalDocsCache && Object.keys(legalDocsCache).length > 0 && 
+      (now - legalDocsCacheTimestamp) < LEGAL_DOCS_CACHE_TTL) {
+    return legalDocsCache;
+  }
+  
+  const legalDocs = {};
+  
+  try {
+    // First, try to load from company context (if URLs are configured)
+    const companyContext = loadCompanyContext();
+    const legalURLs = companyContext.legalDocuments || {};
+    
+    // Legal document URL mappings
+    const legalDocTypes = [
+      { name: "terms", urlKey: "termsOfService", defaultPath: "/terms-of-service" },
+      { name: "privacy", urlKey: "privacyPolicy", defaultPath: "/privacy-policy" },
+      { name: "refund", urlKey: "refundPolicy", defaultPath: "/refund-policy" },
+      { name: "return", urlKey: "returnPolicy", defaultPath: "/return-policy" },
+      { name: "shipping", urlKey: "shippingPolicy", defaultPath: "/shipping-policy" },
+      { name: "cookies", urlKey: "cookiePolicy", defaultPath: "/cookie-policy" },
+      { name: "payment", urlKey: "paymentPolicy", defaultPath: "/payment-policy" },
+      { name: "company", urlKey: "companyDetails", defaultPath: "/company-details" },
+      { name: "accessibility", urlKey: "accessibilityStatement", defaultPath: "/accessibility-statement" }
+    ];
+    
+    // Get website base URL from company context or WooCommerce
+    const websiteBase = companyContext.website || 
+                        (WC_API_URL ? WC_API_URL.replace(/\/wp-json.*$/, '') : null) ||
+                        "https://maromcosmetic.com";
+    
+    // Fetch from URLs if configured
+    for (const { name, urlKey, defaultPath } of legalDocTypes) {
+      let url = legalURLs[urlKey] || legalURLs[name];
+      
+      // If no URL in config, try default path
+      if (!url && websiteBase) {
+        url = websiteBase.replace(/\/$/, '') + defaultPath;
+      }
+      
+      if (url) {
+        try {
+          console.log(`[Legal] Fetching ${name} from: ${url}`);
+          const content = await fetchLegalDocumentFromURL(url);
+          if (content && content.length > 100) { // Only use if substantial content
+            legalDocs[name] = content;
+            console.log(`[Legal] Successfully loaded ${name} (${content.length} chars)`);
+          }
+        } catch (err) {
+          console.error(`[Legal] Error fetching ${name} from URL:`, err.message);
+        }
+      }
+    }
+    
+    // Fallback: Try loading from local files if URLs didn't work
+    if (Object.keys(legalDocs).length === 0) {
+      const legalFiles = [
+        { name: "terms", filename: "terms-of-service.txt" },
+        { name: "privacy", filename: "privacy-policy.txt" },
+        { name: "refund", filename: "refund-policy.txt" },
+        { name: "return", filename: "return-policy.txt" },
+        { name: "shipping", filename: "shipping-policy.txt" },
+        { name: "cookies", filename: "cookie-policy.txt" },
+        { name: "payment", filename: "payment-policy.txt" },
+        { name: "company", filename: "company-details.txt" },
+        { name: "accessibility", filename: "accessibility-statement.txt" }
+      ];
+      
+      legalFiles.forEach(({ name, filename }) => {
+        const filePath = path.join(LEGAL_DIR, filename);
+        if (fs.existsSync(filePath)) {
+          try {
+            const content = fs.readFileSync(filePath, "utf8");
+            if (content.trim()) {
+              legalDocs[name] = content.trim();
+            }
+          } catch (err) {
+            console.error(`[Legal] Error reading ${filename}:`, err.message);
+          }
+        }
+      });
+    }
+    
+    // Cache the results
+    legalDocsCache = legalDocs;
+    legalDocsCacheTimestamp = now;
+    
+    return legalDocs;
+  } catch (err) {
+    console.error("[Legal] Error loading legal documents:", err);
+    return legalDocsCache || {};
+  }
+}
+
+// Detect if message is asking about legal documents
+function isLegalQuery(message) {
+  const lower = message.toLowerCase();
+  const legalKeywords = [
+    "terms", "terms of service", "terms and conditions", "tos",
+    "privacy", "privacy policy", "data protection", "gdpr",
+    "refund", "refunds", "refund policy", "money back",
+    "return", "returns", "return policy", "exchange",
+    "shipping", "delivery", "shipping policy", "shipping terms",
+    "cookie", "cookies", "cookie policy",
+    "payment", "payment policy", "payment method", "how to pay", "payment options",
+    "company", "company details", "about company", "company info", "company information",
+    "accessibility", "accessibility statement", "a11y",
+    "legal", "policy", "policies", "agreement"
+  ];
+  
+  return legalKeywords.some(keyword => lower.includes(keyword));
 }
 
 // WooCommerce configuration
@@ -4980,6 +5175,55 @@ app.get("/api/company/context", (req, res) => {
   }
 });
 
+// Get legal document URLs configuration
+app.get("/api/legal/urls", (req, res) => {
+  try {
+    const context = loadCompanyContext();
+    const legalURLs = context.legalDocuments || {};
+    res.json({
+      success: true,
+      legalDocuments: legalURLs,
+      website: context.website || (WC_API_URL ? WC_API_URL.replace(/\/wp-json.*$/, '') : null) || "https://maromcosmetic.com"
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Update legal document URLs
+app.post("/api/legal/urls", requireAdminKey, async (req, res) => {
+  try {
+    const { legalDocuments, website } = req.body;
+    const context = loadCompanyContext();
+    
+    if (legalDocuments) {
+      context.legalDocuments = {
+        ...(context.legalDocuments || {}),
+        ...legalDocuments
+      };
+    }
+    
+    if (website) {
+      context.website = website;
+    }
+    
+    saveCompanyContext(context);
+    
+    // Clear legal docs cache to force refresh
+    legalDocsCache = {};
+    legalDocsCacheTimestamp = 0;
+    
+    res.json({
+      success: true,
+      message: "Legal document URLs updated",
+      legalDocuments: context.legalDocuments,
+      website: context.website
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // WooCommerce Products CRUD endpoints
 
 // GET /api/products - List products
@@ -5258,7 +5502,81 @@ app.post("/api/chat", async (req, res) => {
     const companyContext = loadCompanyContext();
     const lowerMessage = message.toLowerCase();
     
-    // 3. Detect product-related queries and fetch relevant products
+    // 3. Detect legal document queries and load relevant documents
+    let legalContext = "";
+    const isLegal = isLegalQuery(message);
+    if (isLegal) {
+      try {
+        const legalDocs = await loadLegalDocuments();
+        if (Object.keys(legalDocs).length > 0) {
+          legalContext = "\n\nLEGAL DOCUMENTS:\n";
+          
+          // Add relevant documents based on query
+          if (lowerMessage.includes("terms") || lowerMessage.includes("tos") || lowerMessage.includes("agreement")) {
+            if (legalDocs.terms) {
+              legalContext += `\nTERMS OF SERVICE:\n${legalDocs.terms.substring(0, 2000)}${legalDocs.terms.length > 2000 ? '...' : ''}\n`;
+            }
+          }
+          if (lowerMessage.includes("privacy") || lowerMessage.includes("data") || lowerMessage.includes("gdpr")) {
+            if (legalDocs.privacy) {
+              legalContext += `\nPRIVACY POLICY:\n${legalDocs.privacy.substring(0, 2000)}${legalDocs.privacy.length > 2000 ? '...' : ''}\n`;
+            }
+          }
+          if (lowerMessage.includes("refund") || lowerMessage.includes("money back")) {
+            if (legalDocs.refund) {
+              legalContext += `\nREFUND POLICY:\n${legalDocs.refund.substring(0, 2000)}${legalDocs.refund.length > 2000 ? '...' : ''}\n`;
+            }
+          }
+          if (lowerMessage.includes("return") || lowerMessage.includes("exchange")) {
+            if (legalDocs.return) {
+              legalContext += `\nRETURN POLICY:\n${legalDocs.return.substring(0, 2000)}${legalDocs.return.length > 2000 ? '...' : ''}\n`;
+            }
+          }
+          if (lowerMessage.includes("shipping") || lowerMessage.includes("delivery")) {
+            if (legalDocs.shipping) {
+              legalContext += `\nSHIPPING POLICY:\n${legalDocs.shipping.substring(0, 2000)}${legalDocs.shipping.length > 2000 ? '...' : ''}\n`;
+            }
+          }
+          if (lowerMessage.includes("cookie")) {
+            if (legalDocs.cookies) {
+              legalContext += `\nCOOKIE POLICY:\n${legalDocs.cookies.substring(0, 2000)}${legalDocs.cookies.length > 2000 ? '...' : ''}\n`;
+            }
+          }
+          if (lowerMessage.includes("payment") || lowerMessage.includes("pay") || lowerMessage.includes("payment method") || lowerMessage.includes("payment options")) {
+            if (legalDocs.payment) {
+              legalContext += `\nPAYMENT POLICY:\n${legalDocs.payment.substring(0, 2000)}${legalDocs.payment.length > 2000 ? '...' : ''}\n`;
+            }
+          }
+          if (lowerMessage.includes("company") || lowerMessage.includes("company details") || lowerMessage.includes("about company") || lowerMessage.includes("company info")) {
+            if (legalDocs.company) {
+              legalContext += `\nCOMPANY DETAILS:\n${legalDocs.company.substring(0, 2000)}${legalDocs.company.length > 2000 ? '...' : ''}\n`;
+            }
+          }
+          if (lowerMessage.includes("accessibility") || lowerMessage.includes("a11y")) {
+            if (legalDocs.accessibility) {
+              legalContext += `\nACCESSIBILITY STATEMENT:\n${legalDocs.accessibility.substring(0, 2000)}${legalDocs.accessibility.length > 2000 ? '...' : ''}\n`;
+            }
+          }
+          
+          // If general legal query, include all available documents
+          if (!legalContext.includes("TERMS") && !legalContext.includes("PRIVACY") && 
+              !legalContext.includes("REFUND") && !legalContext.includes("RETURN") &&
+              !legalContext.includes("SHIPPING") && !legalContext.includes("COOKIE") &&
+              !legalContext.includes("PAYMENT") && !legalContext.includes("COMPANY") &&
+              !legalContext.includes("ACCESSIBILITY")) {
+            Object.entries(legalDocs).forEach(([name, content]) => {
+              const docName = name.charAt(0).toUpperCase() + name.slice(1).replace(/([A-Z])/g, ' $1');
+              legalContext += `\n${docName.toUpperCase()} POLICY:\n${content.substring(0, 1500)}${content.length > 1500 ? '...' : ''}\n`;
+            });
+          }
+        }
+      } catch (err) {
+        console.error("[Chat] Error loading legal documents:", err.message);
+        // Continue without legal context if load fails
+      }
+    }
+    
+    // 4. Detect product-related queries and fetch relevant products
     let productContext = "";
     let relevantProducts = [];
     
@@ -5357,7 +5675,7 @@ app.post("/api/chat", async (req, res) => {
       }
     }
     
-    // 4. Build enhanced system prompt with company and product context
+    // 5. Build enhanced system prompt with company, product, and legal context
     let systemPrompt = `You are Marom's virtual assistant helping website visitors.
 
 COMPANY INFORMATION:
@@ -5368,25 +5686,30 @@ ${companyContext.targetAudience ? `- Target Audience: ${companyContext.targetAud
 
 ${productContext}
 
+${legalContext}
+
 RULES:
 - You help visitors with questions about hair loss, scalp care, and Marom products.
 - Marom products are natural and moringa-based.
 - Be supportive, calm, and easy to understand.
 - When mentioning products, include prices and brief descriptions if available.
+- When answering legal questions, use the exact information from the legal documents provided above.
+- For legal questions, be accurate and refer to the specific policy or terms document.
 - Do NOT give medical advice or diagnoses. No "treat/cure/prevent" claims.
 - Do NOT talk about campaigns, ads, dashboards, internal tools, or analytics.
 - If someone asks about products, provide specific information from the product list above.
 - If asked about prices, use the exact prices from the product information.
-- If unsure, give general, gentle guidance and suggest exploring Marom products.
-- Keep answers concise and helpful (2-3 sentences when possible).`;
+- If asked about legal matters (terms, privacy, refunds, returns, shipping), use the legal documents provided above.
+- If unsure, give general, gentle guidance and suggest exploring Marom products or contacting support.
+- Keep answers concise and helpful (2-3 sentences when possible, but legal questions may require more detail).`;
 
-    // 5. Call AI with enhanced context
+    // 6. Call AI with enhanced context
     const aiResponse = await generateAIResponse({
       system: systemPrompt,
       user: message
     });
 
-    // 6. Return answer to frontend
+    // 7. Return answer to frontend
     return res.json({
       reply: aiResponse
     });
