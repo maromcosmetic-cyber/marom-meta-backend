@@ -6225,6 +6225,51 @@ Make it feel personal and tailored to their specific situation, not generic. Ref
       }
     }
 
+    // Send email if provided (don't block response if it fails)
+    if (email && email.trim()) {
+      try {
+        // Get WordPress base URL from WooCommerce config
+        const wpBaseUrl = WC_API_URL.replace(/\/wp-json\/wc\/v3.*$/, '').replace(/\/$/, '');
+        const emailEndpoint = `${wpBaseUrl}/wp-json/marom/v1/send-quiz-email`;
+        
+        // Prepare quiz data for email
+        const emailData = {
+          email: email.trim(),
+          quiz_data: {
+            patternName: aiResult.patternName || primaryPattern,
+            title: aiResult.title || "Your Hair Analysis",
+            description: aiResult.description || "",
+            meaning: aiResult.meaning || [],
+            plan: aiResult.plan || [],
+            food: aiResult.food || [],
+            personalizedInsights: aiResult.personalizedInsights || "",
+            products: recommendedProducts.map(p => ({
+              name: p.name,
+              reason: p.reason,
+              price: p.price,
+              sale_price: p.sale_price,
+              permalink: p.permalink,
+              image: p.image
+            }))
+          }
+        };
+        
+        // Send email asynchronously (don't wait for response)
+        axios.post(emailEndpoint, emailData, {
+          headers: { 'Content-Type': 'application/json' },
+          timeout: 10000
+        }).then(() => {
+          console.log(`[Quiz] Email sent successfully to ${email}`);
+        }).catch((err) => {
+          console.error(`[Quiz] Failed to send email to ${email}:`, err.message);
+          // Don't throw - email failure shouldn't break quiz results
+        });
+      } catch (err) {
+        console.error("[Quiz] Error preparing email:", err.message);
+        // Continue even if email setup fails
+      }
+    }
+
     // Return results
     return res.json({
       success: true,
