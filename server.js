@@ -5894,7 +5894,7 @@ ${currentProduct ? `- CRITICAL: The user is currently viewing the product "${cur
 // Quiz Analysis endpoint - AI-powered hair loss quiz results
 app.post("/api/quiz/analyze", async (req, res) => {
   try {
-    const { answers, goal, email } = req.body;
+    const { answers, goal, email, gender } = req.body;
 
     if (!answers || typeof answers !== "object") {
       return res.status(400).json({
@@ -5950,19 +5950,32 @@ app.post("/api/quiz/analyze", async (req, res) => {
     }
 
     // Build quiz answers summary
+    const isWoman = gender === "woman";
+    const isMan = gender === "man";
+    
+    const questions = isWoman ? {
+      1: "When did you first notice more hair fall?",
+      2: "How does your scalp feel most days?",
+      3: "How often do you wash your hair?",
+      4: "Which feels most true right now?",
+      5: "Have you tried hair-loss treatments before?",
+      6: "How's your energy lately?",
+      7: "Are you in a postpartum period right now?",
+      8: "What's your #1 goal?"
+    } : {
+      1: "When did you first notice more hair fall or thinning?",
+      2: "How does your scalp feel most days?",
+      3: "How often do you wash your hair?",
+      4: "Which feels most true right now?",
+      5: "Have you tried hair-loss treatments before?",
+      6: "How's your energy and stress level lately?",
+      7: "What's your age range?",
+      8: "What's your #1 goal?"
+    };
+    
     const answerSummary = Object.entries(answers)
       .map(([step, data]) => {
         const stepNum = parseInt(step, 10);
-        const questions = {
-          1: "When did you first notice more hair fall?",
-          2: "How does your scalp feel most days?",
-          3: "How often do you wash your hair?",
-          4: "Which feels most true right now?",
-          5: "Have you tried hair-loss treatments before?",
-          6: "How's your energy lately?",
-          7: "Are you in a postpartum period right now?",
-          8: "What's your #1 goal?"
-        };
         return `Q${stepNum}: ${questions[stepNum] || `Question ${stepNum}`}\nAnswer: ${data.value || data}`;
       })
       .join("\n\n");
@@ -5976,8 +5989,11 @@ app.post("/api/quiz/analyze", async (req, res) => {
         });
       }
     });
-    if (answers[7]?.value === "pp_yes") scores.hormonal += 2;
-    if (answers[1]?.value === "postpartum") scores.hormonal += 2;
+    // Gender-specific scoring
+    if (isWoman) {
+      if (answers[7]?.value === "pp_yes") scores.hormonal += 2;
+      if (answers[1]?.value === "postpartum") scores.hormonal += 2;
+    }
     if (answers[6]?.value === "exhausted") scores.stress += 1;
 
     const primaryPattern = Object.keys(scores).reduce((a, b) => scores[a] > scores[b] ? a : b);
@@ -6004,10 +6020,14 @@ IMPORTANT RULES:
 
     const userPrompt = `Analyze this hair loss quiz and provide personalized results:
 
+USER GENDER: ${gender === "woman" ? "Woman" : gender === "man" ? "Man" : "Not specified"}
+
 QUIZ ANSWERS:
 ${answerSummary}
 
 USER'S PRIMARY GOAL: ${goal || "Not specified"}
+
+${gender === "man" ? "IMPORTANT: This user is a man. Tailor your recommendations for male pattern hair loss, common male hair concerns (receding hairline, crown thinning), and male-specific hair care needs. Avoid references to postpartum, pregnancy, or female-specific hormonal patterns." : gender === "woman" ? "IMPORTANT: This user is a woman. Consider female-specific concerns like postpartum hair loss, hormonal changes, and women's hair care needs." : ""}
 
 Based on these answers, provide a comprehensive analysis in JSON format:
 {
