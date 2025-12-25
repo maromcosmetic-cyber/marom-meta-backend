@@ -155,3 +155,325 @@ export async function backupAllFiles() {
   return results;
 }
 
+// ============================================
+// GOOGLE DRIVE PRIMARY STORAGE FUNCTIONS
+// ============================================
+
+// Find or create data folder (for live data storage)
+async function getOrCreateDataFolder(drive) {
+  const folderName = 'Marom-Data';
+  const shareEmail = process.env.BACKUP_SHARE_EMAIL || 'maromcosmetic@gmail.com';
+  
+  try {
+    const response = await drive.files.list({
+      q: `name='${folderName}' and mimeType='application/vnd.google-apps.folder' and trashed=false`,
+      fields: 'files(id, name)'
+    });
+
+    if (response.data.files.length > 0) {
+      const folderId = response.data.files[0].id;
+      await shareWithEmail(drive, folderId, shareEmail);
+      return folderId;
+    }
+
+    const folder = await drive.files.create({
+      requestBody: {
+        name: folderName,
+        mimeType: 'application/vnd.google-apps.folder'
+      },
+      fields: 'id'
+    });
+
+    const folderId = folder.data.id;
+    await shareWithEmail(drive, folderId, shareEmail);
+    
+    return folderId;
+  } catch (error) {
+    console.error('[Drive Storage] Error finding/creating data folder:', error.message);
+    throw error;
+  }
+}
+
+// Find or create media folder
+async function getOrCreateMediaFolder(drive) {
+  const folderName = 'Marom-Media';
+  const shareEmail = process.env.BACKUP_SHARE_EMAIL || 'maromcosmetic@gmail.com';
+  
+  try {
+    const response = await drive.files.list({
+      q: `name='${folderName}' and mimeType='application/vnd.google-apps.folder' and trashed=false`,
+      fields: 'files(id, name)'
+    });
+
+    if (response.data.files.length > 0) {
+      const folderId = response.data.files[0].id;
+      await shareWithEmail(drive, folderId, shareEmail);
+      return folderId;
+    }
+
+    const folder = await drive.files.create({
+      requestBody: {
+        name: folderName,
+        mimeType: 'application/vnd.google-apps.folder'
+      },
+      fields: 'id'
+    });
+
+    const folderId = folder.data.id;
+    await shareWithEmail(drive, folderId, shareEmail);
+    
+    return folderId;
+  } catch (error) {
+    console.error('[Drive Storage] Error finding/creating media folder:', error.message);
+    throw error;
+  }
+}
+
+// Save JSON data to Google Drive (primary storage)
+export async function saveDataToDrive(fileName, data) {
+  try {
+    if (!process.env.GOOGLE_DRIVE_CLIENT_EMAIL || !process.env.GOOGLE_DRIVE_PRIVATE_KEY) {
+      console.warn('[Drive Storage] Google Drive credentials not configured');
+      return { success: false, error: 'Google Drive not configured' };
+    }
+
+    const drive = await getDriveClient();
+    const folderId = await getOrCreateDataFolder(drive);
+    
+    // Check if file already exists
+    const existingFiles = await drive.files.list({
+      q: `name='${fileName}' and '${folderId}' in parents and trashed=false`,
+      fields: 'files(id, name)'
+    });
+
+    const jsonData = JSON.stringify(data, null, 2);
+    const buffer = Buffer.from(jsonData, 'utf8');
+
+    let fileId = null;
+    if (existingFiles.data.files.length > 0) {
+      // Update existing file
+      fileId = existingFiles.data.files[0].id;
+      await drive.files.update({
+        fileId: fileId,
+        media: {
+          mimeType: 'application/json',
+          body: buffer
+        },
+        fields: 'id, name, modifiedTime'
+      });
+      console.log(`[Drive Storage] ✅ Updated ${fileName} in Google Drive`);
+    } else {
+      // Create new file
+      const file = await drive.files.create({
+        requestBody: {
+          name: fileName,
+          parents: [folderId],
+          mimeType: 'application/json'
+        },
+        media: {
+          mimeType: 'application/json',
+          body: buffer
+        },
+        fields: 'id, name, webViewLink'
+      });
+      fileId = file.data.id;
+      
+      // Share with email
+      const shareEmail = process.env.BACKUP_SHARE_EMAIL || 'maromcosmetic@gmail.com';
+      await shareWithEmail(drive, fileId, shareEmail);
+      
+      console.log(`[Drive Storage] ✅ Created ${fileName} in Google Drive`);
+    }
+
+    return {
+      success: true,
+      fileId: fileId,
+      fileName: fileName
+    };
+  } catch (error) {
+    console.error(`[Drive Storage] ❌ Error saving ${fileName}:`, error.message);
+    return { success: false, error: error.message };
+  }
+}
+
+// Load JSON data from Google Drive
+export async function loadDataFromDrive(fileName) {
+  try {
+    if (!process.env.GOOGLE_DRIVE_CLIENT_EMAIL || !process.env.GOOGLE_DRIVE_PRIVATE_KEY) {
+      console.warn('[Drive Storage] Google Drive credentials not configured');
+      return { success: false, error: 'Google Drive not configured' };
+    }
+
+    const drive = await getDriveClient();
+    const folderId = await getOrCreateDataFolder(drive);
+    
+    // Find file
+    const response = await drive.files.list({
+      q: `name='${fileName}' and '${folderId}' in parents and trashed=false`,
+      fields: 'files(id, name)'
+    });
+
+    if (response.data.files.length === 0) {
+      return { success: false, error: 'File not found', data: null };
+    }
+
+    const fileId = response.data.files[0].id;
+    
+    // Download file content
+    const fileContent = await drive.files.get({
+      fileId: fileId,
+      alt: 'media'
+    }, { responseType: 'text' });
+
+    const data = JSON.parse(fileContent.data);
+    console.log(`[Drive Storage] ✅ Loaded ${fileName} from Google Drive`);
+    
+    return {
+      success: true,
+      data: data,
+      fileId: fileId
+    };
+  } catch (error) {
+    console.error(`[Drive Storage] ❌ Error loading ${fileName}:`, error.message);
+    return { success: false, error: error.message, data: null };
+  }
+}
+
+// Upload media file (image/video) to Google Drive
+export async function uploadMediaToDrive(buffer, fileName, mimeType, metadata = {}) {
+  try {
+    if (!process.env.GOOGLE_DRIVE_CLIENT_EMAIL || !process.env.GOOGLE_DRIVE_PRIVATE_KEY) {
+      console.warn('[Drive Storage] Google Drive credentials not configured');
+      return { success: false, error: 'Google Drive not configured' };
+    }
+
+    const drive = await getDriveClient();
+    const folderId = await getOrCreateMediaFolder(drive);
+    
+    // Determine file extension from mimeType
+    let ext = 'jpg';
+    if (mimeType.includes('png')) ext = 'png';
+    else if (mimeType.includes('gif')) ext = 'gif';
+    else if (mimeType.includes('webp')) ext = 'webp';
+    else if (mimeType.includes('mp4')) ext = 'mp4';
+    else if (mimeType.includes('mov')) ext = 'mov';
+    else if (mimeType.includes('jpeg')) ext = 'jpg';
+    
+    const timestamp = Date.now();
+    const randomStr = Math.random().toString(36).substring(2, 8);
+    const fullFileName = `${fileName || 'media'}_${timestamp}_${randomStr}.${ext}`;
+    
+    const fileMetadata = {
+      name: fullFileName,
+      parents: [folderId],
+      description: metadata.description || '',
+      properties: {
+        prompt: metadata.prompt || '',
+        aspectRatio: metadata.aspectRatio || '',
+        mode: metadata.mode || '',
+        generatedAt: new Date().toISOString()
+      }
+    };
+
+    const media = {
+      mimeType: mimeType,
+      body: buffer
+    };
+
+    const file = await drive.files.create({
+      requestBody: fileMetadata,
+      media: media,
+      fields: 'id, name, webViewLink, webContentLink, thumbnailLink, createdTime, size'
+    });
+
+    // Share with email
+    const shareEmail = process.env.BACKUP_SHARE_EMAIL || 'maromcosmetic@gmail.com';
+    await shareWithEmail(drive, file.data.id, shareEmail);
+
+    console.log(`[Drive Storage] ✅ Uploaded media to Google Drive: ${file.data.name}`);
+    
+    return {
+      success: true,
+      fileId: file.data.id,
+      fileName: file.data.name,
+      webViewLink: file.data.webViewLink,
+      webContentLink: file.data.webContentLink, // Direct download link
+      thumbnailLink: file.data.thumbnailLink,
+      createdTime: file.data.createdTime,
+      size: file.data.size
+    };
+  } catch (error) {
+    console.error(`[Drive Storage] ❌ Error uploading media:`, error.message);
+    return { success: false, error: error.message };
+  }
+}
+
+// List all media files from Google Drive
+export async function listMediaFromDrive(limit = 50) {
+  try {
+    if (!process.env.GOOGLE_DRIVE_CLIENT_EMAIL || !process.env.GOOGLE_DRIVE_PRIVATE_KEY) {
+      return { success: false, error: 'Google Drive not configured', files: [] };
+    }
+
+    const drive = await getDriveClient();
+    const folderId = await getOrCreateMediaFolder(drive);
+    
+    const response = await drive.files.list({
+      q: `'${folderId}' in parents and trashed=false`,
+      fields: 'files(id, name, webViewLink, webContentLink, thumbnailLink, createdTime, size, mimeType, properties)',
+      orderBy: 'createdTime desc',
+      pageSize: limit
+    });
+
+    const files = response.data.files.map(file => ({
+      id: file.id,
+      name: file.name,
+      url: file.webContentLink || file.webViewLink,
+      thumbnail: file.thumbnailLink,
+      createdTime: file.createdTime,
+      size: file.size,
+      mimeType: file.mimeType,
+      prompt: file.properties?.prompt || '',
+      aspectRatio: file.properties?.aspectRatio || '',
+      mode: file.properties?.mode || ''
+    }));
+
+    return {
+      success: true,
+      files: files,
+      total: files.length
+    };
+  } catch (error) {
+    console.error('[Drive Storage] Error listing media:', error.message);
+    return { success: false, error: error.message, files: [] };
+  }
+}
+
+// Get direct download URL for a file (with proper permissions)
+export async function getFileDownloadUrl(fileId) {
+  try {
+    if (!process.env.GOOGLE_DRIVE_CLIENT_EMAIL || !process.env.GOOGLE_DRIVE_PRIVATE_KEY) {
+      return { success: false, error: 'Google Drive not configured' };
+    }
+
+    const drive = await getDriveClient();
+    
+    // Get file metadata
+    const file = await drive.files.get({
+      fileId: fileId,
+      fields: 'webContentLink, webViewLink, name, mimeType'
+    });
+
+    return {
+      success: true,
+      downloadUrl: file.data.webContentLink || file.data.webViewLink,
+      viewUrl: file.data.webViewLink,
+      name: file.data.name,
+      mimeType: file.data.mimeType
+    };
+  } catch (error) {
+    console.error('[Drive Storage] Error getting file URL:', error.message);
+    return { success: false, error: error.message };
+  }
+}
+
