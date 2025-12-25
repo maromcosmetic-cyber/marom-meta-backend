@@ -50,7 +50,7 @@ if (!fs.existsSync(LEGAL_DIR)) {
   fs.mkdirSync(LEGAL_DIR, { recursive: true });
 }
 
-// Load company context
+// Load company context (synchronous - from local cache)
 function loadCompanyContext() {
   try {
     if (fs.existsSync(COMPANY_FILE)) {
@@ -72,15 +72,57 @@ function loadCompanyContext() {
   };
 }
 
-// Save company context
-function saveCompanyContext(context) {
+// Sync company context from Google Drive (async - call on startup)
+async function syncCompanyContextFromDrive() {
+  if (backupService && backupService.loadDataFromDrive) {
+    try {
+      const result = await backupService.loadDataFromDrive('company.json');
+      if (result.success && result.data) {
+        console.log("[Drive Storage] ✅ Synced company context from Google Drive");
+        // Update local cache
+        try {
+          fs.writeFileSync(COMPANY_FILE, JSON.stringify(result.data, null, 2), "utf8");
+        } catch (localErr) {
+          console.warn("[Drive Storage] Could not update local cache:", localErr.message);
+        }
+        return result.data;
+      }
+    } catch (err) {
+      console.warn("[Drive Storage] Could not sync from Google Drive:", err.message);
+    }
+  }
+  return null;
+}
+
+// Save company context (async - saves to both Drive and local)
+async function saveCompanyContext(context) {
+  let saved = false;
+  
+  // Save to Google Drive first
+  if (backupService && backupService.saveDataToDrive) {
+    try {
+      const result = await backupService.saveDataToDrive('company.json', context);
+      if (result.success) {
+        console.log("[Drive Storage] ✅ Saved company context to Google Drive");
+        saved = true;
+      }
+    } catch (err) {
+      console.warn("[Drive Storage] Could not save to Google Drive:", err.message);
+    }
+  }
+  
+  // Also save locally as cache
   try {
     fs.writeFileSync(COMPANY_FILE, JSON.stringify(context, null, 2), "utf8");
-    return true;
+    if (!saved) {
+      console.log("[Drive Storage] ✅ Saved company context to local file (Drive unavailable)");
+      saved = true;
+    }
   } catch (err) {
     console.error("Error saving company context:", err);
-    return false;
   }
+  
+  return saved;
 }
 
 // Load conversation history
@@ -8051,6 +8093,40 @@ function addMediaRoutesDirectly() {
     });
   });
   
+  // Media library endpoint - list all media from Google Drive
+  app.get("/api/media/library", requireAdminKey, async (req, res) => {
+    try {
+      const limit = parseInt(req.query.limit) || 50;
+      
+      if (backupService && backupService.listMediaFromDrive) {
+        const result = await backupService.listMediaFromDrive(limit);
+        if (result.success) {
+          return res.json({
+            success: true,
+            files: result.files,
+            total: result.total
+          });
+        } else {
+          return res.status(500).json({
+            success: false,
+            error: result.error || "Failed to load media library"
+          });
+        }
+      } else {
+        return res.status(503).json({
+          success: false,
+          error: "Google Drive storage not available"
+        });
+      }
+    } catch (err) {
+      console.error("[Media Library] Error:", err);
+      res.status(500).json({
+        success: false,
+        error: err.message || "Failed to load media library"
+      });
+    }
+  });
+  
   // Upload image endpoint - accepts base64 or multipart
   app.post("/api/media/upload", requireAdminKey, express.json({ limit: '50mb' }), async (req, res) => {
     try {
@@ -8071,18 +8147,43 @@ function addMediaRoutesDirectly() {
           fs.mkdirSync(uploadsDir, { recursive: true });
         }
         
-        const filepath = path.join(uploadsDir, filename);
-        fs.writeFileSync(filepath, buffer);
+        // Save to Google Drive
+        let driveUrl = null;
+        if (backupService && backupService.uploadMediaToDrive) {
+          try {
+            const mimeType = req.body.format === 'png' ? 'image/png' : 'image/jpeg';
+            const driveResult = await backupService.uploadMediaToDrive(
+              buffer,
+              `upload_${timestamp}`,
+              mimeType,
+              {
+                mode: "upload",
+                uploadedAt: new Date().toISOString()
+              }
+            );
+            if (driveResult.success) {
+              console.log(`[Drive Storage] ✅ Saved uploaded image to Google Drive: ${driveResult.fileName}`);
+              driveUrl = driveResult.webContentLink || driveResult.webViewLink;
+            }
+          } catch (driveErr) {
+            console.warn("[Drive Storage] Could not save upload to Google Drive:", driveErr.message);
+          }
+        }
         
-        // Return URL
-        const baseUrl = process.env.API_URL || `https://marom-meta-backend.onrender.com`;
-        const imageUrl = `${baseUrl}/uploads/${filename}`;
+        // Also save locally as backup (if Drive not available)
+        if (!driveUrl) {
+          const filepath = path.join(uploadsDir, filename);
+          fs.writeFileSync(filepath, buffer);
+          const baseUrl = process.env.API_URL || `https://marom-meta-backend.onrender.com`;
+          driveUrl = `${baseUrl}/uploads/${filename}`;
+        }
         
         return res.json({
           success: true,
-          url: imageUrl,
-          imageUrl: imageUrl,
-          filename: filename
+          url: driveUrl,
+          imageUrl: driveUrl,
+          filename: filename,
+          storedInDrive: !!backupService
         });
       }
       
@@ -8229,6 +8330,32 @@ function addMediaRoutesDirectly() {
       }
       
       const result = await generateImage(prompt, aspectRatio || "1:1", productContext);
+      
+      // Save to Google Drive
+      if (backupService && backupService.uploadMediaToDrive) {
+        try {
+          const driveResult = await backupService.uploadMediaToDrive(
+            result.buffer,
+            `generated_${Date.now()}`,
+            result.mimeType,
+            {
+              prompt: prompt,
+              aspectRatio: aspectRatio || "1:1",
+              mode: mode,
+              model: result.model
+            }
+          );
+          if (driveResult.success) {
+            console.log(`[Drive Storage] ✅ Saved generated image to Google Drive: ${driveResult.fileName}`);
+            // Add Drive URL to response headers
+            res.set("X-Drive-Url", driveResult.webContentLink || driveResult.webViewLink);
+            res.set("X-Drive-FileId", driveResult.fileId);
+          }
+        } catch (driveErr) {
+          console.warn("[Drive Storage] Could not save to Google Drive:", driveErr.message);
+        }
+      }
+      
       res.set({
         "Content-Type": result.mimeType,
         "Content-Length": result.buffer.length,
@@ -8312,6 +8439,30 @@ function addMediaRoutesDirectly() {
       );
       
       console.log(`[Composite API] Image generated successfully (${result.buffer.length} bytes)`);
+      
+      // Save to Google Drive
+      if (backupService && backupService.uploadMediaToDrive) {
+        try {
+          const driveResult = await backupService.uploadMediaToDrive(
+            result.buffer,
+            `composite_${Date.now()}`,
+            result.mimeType,
+            {
+              prompt: prompt,
+              aspectRatio: aspectRatio || "1:1",
+              mode: "composite",
+              model: result.model
+            }
+          );
+          if (driveResult.success) {
+            console.log(`[Drive Storage] ✅ Saved composite image to Google Drive: ${driveResult.fileName}`);
+            res.set("X-Drive-Url", driveResult.webContentLink || driveResult.webViewLink);
+            res.set("X-Drive-FileId", driveResult.fileId);
+          }
+        } catch (driveErr) {
+          console.warn("[Drive Storage] Could not save composite to Google Drive:", driveErr.message);
+        }
+      }
       
       res.set({
         "Content-Type": result.mimeType,
@@ -8404,6 +8555,31 @@ function addMediaRoutesDirectly() {
       
       console.log(`[Video API] Video generated successfully (${result.buffer.length} bytes)`);
       
+      // Save to Google Drive
+      if (backupService && backupService.uploadMediaToDrive) {
+        try {
+          const driveResult = await backupService.uploadMediaToDrive(
+            result.buffer,
+            `video_${Date.now()}`,
+            result.mimeType,
+            {
+              prompt: prompt,
+              aspectRatio: aspectRatio || "16:9",
+              mode: "video",
+              duration: finalDuration,
+              quality: quality || "standard"
+            }
+          );
+          if (driveResult.success) {
+            console.log(`[Drive Storage] ✅ Saved video to Google Drive: ${driveResult.fileName}`);
+            res.set("X-Drive-Url", driveResult.webContentLink || driveResult.webViewLink);
+            res.set("X-Drive-FileId", driveResult.fileId);
+          }
+        } catch (driveErr) {
+          console.warn("[Drive Storage] Could not save video to Google Drive:", driveErr.message);
+        }
+      }
+      
       res.set({
         "Content-Type": result.mimeType,
         "Content-Length": result.buffer.length,
@@ -8424,6 +8600,8 @@ function addMediaRoutesDirectly() {
   
   console.log("✅ Media routes added directly");
   console.log("   - GET /api/media/test");
+  console.log("   - GET /api/media/library");
+  console.log("   - POST /api/media/upload");
   console.log("   - POST /api/media/create");
   console.log("   - POST /api/media/composite");
   console.log("   - POST /api/media/video");
@@ -8495,6 +8673,18 @@ setInterval(async () => {
     }
   }
 }, 60 * 60 * 1000); // Check every hour
+
+// Sync company context from Google Drive on startup
+setTimeout(async () => {
+  if (backupService) {
+    console.log("[Drive Storage] Syncing company context from Google Drive...");
+    try {
+      await syncCompanyContextFromDrive();
+    } catch (err) {
+      console.error("[Drive Storage] Failed to sync company context:", err.message);
+    }
+  }
+}, 2000); // 2 second delay
 
 // Run initial backup after 1 minute (to let server start)
 setTimeout(async () => {
