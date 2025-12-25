@@ -8619,11 +8619,24 @@ if (!routesLoaded) {
 
 // Import backup service
 let backupService = null;
+let backupServiceError = null;
 try {
-  backupService = await import('./services/backupService.js');
+  const backupModule = await import('./services/backupService.js');
+  backupService = backupModule;
   console.log("✅ Backup service loaded");
+  console.log("Available exports:", Object.keys(backupModule));
+  
+  // Test if Google Drive credentials are configured
+  if (process.env.GOOGLE_DRIVE_CLIENT_EMAIL && process.env.GOOGLE_DRIVE_PRIVATE_KEY) {
+    console.log("✅ Google Drive credentials found");
+  } else {
+    console.warn("⚠️ Google Drive credentials not configured in environment variables");
+    backupServiceError = "Google Drive credentials not configured. Please set GOOGLE_DRIVE_CLIENT_EMAIL, GOOGLE_DRIVE_PRIVATE_KEY, and GOOGLE_DRIVE_PROJECT_ID in your environment variables.";
+  }
 } catch (err) {
-  console.warn("⚠️ Backup service not available:", err.message);
+  console.error("❌ Backup service import failed:", err.message);
+  console.error("Error stack:", err.stack);
+  backupServiceError = `Failed to load backup service: ${err.message}`;
 }
 
 // Manual backup endpoint
@@ -8632,11 +8645,34 @@ app.post("/api/backup/run", async (req, res) => {
     if (!backupService) {
       return res.status(503).json({ 
         success: false, 
-        error: "Backup service not available. Check Google Drive credentials." 
+        error: backupServiceError || "Backup service not available. Check Google Drive credentials.",
+        details: backupServiceError
       });
     }
     
+    // Check if credentials are configured
+    if (!process.env.GOOGLE_DRIVE_CLIENT_EMAIL || !process.env.GOOGLE_DRIVE_PRIVATE_KEY) {
+      return res.status(503).json({
+        success: false,
+        error: "Google Drive credentials not configured",
+        details: "Please set GOOGLE_DRIVE_CLIENT_EMAIL, GOOGLE_DRIVE_PRIVATE_KEY, and GOOGLE_DRIVE_PROJECT_ID in your environment variables (Render dashboard)."
+      });
+    }
+    
+    // Check if backupAllFiles function exists
+    if (!backupService.backupAllFiles || typeof backupService.backupAllFiles !== 'function') {
+      console.error("[Backup] backupAllFiles function not found. Available exports:", Object.keys(backupService));
+      return res.status(500).json({
+        success: false,
+        error: "Backup function not available",
+        details: `Available exports: ${Object.keys(backupService).join(', ')}`
+      });
+    }
+    
+    console.log("[Backup] Starting backup...");
     const results = await backupService.backupAllFiles();
+    console.log("[Backup] Backup completed. Results:", results);
+    
     const successCount = results.filter(r => r.success).length;
     const totalCount = results.length;
     
@@ -8651,8 +8687,42 @@ app.post("/api/backup/run", async (req, res) => {
     });
   } catch (err) {
     console.error("[Backup] Error:", err);
-    res.status(500).json({ success: false, error: err.message });
+    res.status(500).json({ 
+      success: false, 
+      error: err.message,
+      details: err.stack
+    });
   }
+});
+
+// Get backup service status
+app.get("/api/backup/status", async (req, res) => {
+  const hasService = !!backupService;
+  const hasCredentials = !!(process.env.GOOGLE_DRIVE_CLIENT_EMAIL && process.env.GOOGLE_DRIVE_PRIVATE_KEY);
+  
+  let testResult = null;
+  if (hasService && hasCredentials && backupService.getDriveClient) {
+    try {
+      // Test if we can create a Drive client
+      const drive = await backupService.getDriveClient();
+      testResult = { success: true, message: "Google Drive authentication successful" };
+    } catch (err) {
+      testResult = { success: false, error: err.message, details: err.stack };
+    }
+  }
+  
+  res.json({
+    success: true,
+    serviceAvailable: hasService,
+    credentialsConfigured: hasCredentials,
+    testResult: testResult,
+    error: backupServiceError || null,
+    message: hasService && hasCredentials 
+      ? (testResult?.success ? "Backup service is ready" : `Backup service error: ${testResult?.error}`)
+      : !hasService 
+        ? backupServiceError || "Backup service not loaded"
+        : "Google Drive credentials not configured"
+  });
 });
 
 // Scheduled backup (runs every 6 hours)
