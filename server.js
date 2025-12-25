@@ -8,6 +8,7 @@ import { fileURLToPath } from "url";
 import OpenAI from "openai";
 import sharp from "sharp";
 import FormData from "form-data";
+import * as cheerio from "cheerio";
 import {
   WORKFLOWS,
   isMenuTrigger,
@@ -5523,10 +5524,57 @@ app.post("/api/company/context", (req, res) => {
   }
 });
 
+// Function to fetch website content (FAQ, pages, etc.)
+async function fetchWebsiteContent(url) {
+  try {
+    const response = await axios.get(url, {
+      timeout: 5000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; MaromBot/1.0)'
+      }
+    });
+    
+    const $ = cheerio.load(response.data);
+    
+    // Remove scripts, styles, and other non-content elements
+    $('script, style, nav, footer, header, .wp-block-navigation, .navigation, .menu').remove();
+    
+    // Extract main content
+    let content = $('main, article, .entry-content, .content, #content, .post-content').first();
+    if (content.length === 0) {
+      content = $('body');
+    }
+    
+    // Get text content
+    let text = content.text()
+      .replace(/\s+/g, ' ')
+      .replace(/\n\s*\n/g, '\n')
+      .trim();
+    
+    // Limit to 3000 characters to avoid token limits
+    return text.substring(0, 3000);
+  } catch (err) {
+    console.error(`[Chat] Error fetching website content from ${url}:`, err.message);
+    return null;
+  }
+}
+
+// Function to detect FAQ page
+function detectFAQPage(pageContext) {
+  if (!pageContext) return false;
+  const path = (pageContext.pathname || '').toLowerCase();
+  const title = (pageContext.title || '').toLowerCase();
+  
+  return path.includes('faq') || 
+         path.includes('frequently-asked') || 
+         title.includes('faq') ||
+         title.includes('frequently asked');
+}
+
 // Chat API endpoint for Marom virtual assistant
 app.post("/api/chat", async (req, res) => {
   try {
-    const { message, pageContext } = req.body;
+    const { message, pageContext, conversationHistory, sessionId } = req.body;
 
     // 1. Validate input
     if (!message || typeof message !== "string") {
@@ -5608,6 +5656,60 @@ app.post("/api/chat", async (req, res) => {
       } catch (err) {
         console.error("[Chat] Error processing page context:", err.message);
         // Continue without page context if processing fails
+      }
+    }
+    
+    // 2.6. Fetch FAQ/website content if on FAQ page or if user asks about FAQ
+    let websiteContent = "";
+    const isFAQQuery = lowerMessage.includes("faq") || 
+                       lowerMessage.includes("frequently asked") || 
+                       lowerMessage.includes("questions") ||
+                       lowerMessage.includes("help") ||
+                       lowerMessage.includes("what is") ||
+                       lowerMessage.includes("how do");
+
+    if (isFAQQuery || detectFAQPage(pageContext)) {
+      try {
+        const websiteBase = companyContext.website || "https://maromcosmetic.com";
+        
+        // Try to fetch FAQ page
+        const faqUrls = [
+          `${websiteBase}/faq/`,
+          `${websiteBase}/frequently-asked-questions/`,
+          `${websiteBase}/help/`,
+          `${websiteBase}/support/`,
+          `${websiteBase}/faqs/`
+        ];
+        
+        for (const url of faqUrls) {
+          const content = await fetchWebsiteContent(url);
+          if (content) {
+            websiteContent = `\n\nFAQ/HELP CONTENT FROM WEBSITE:\n${content}\n`;
+            break;
+          }
+        }
+        
+        // If FAQ page not found, try to fetch current page content
+        if (!websiteContent && pageContext?.url) {
+          const content = await fetchWebsiteContent(pageContext.url);
+          if (content) {
+            websiteContent = `\n\nCURRENT PAGE CONTENT:\n${content}\n`;
+          }
+        }
+      } catch (err) {
+        console.error("[Chat] Error fetching website content:", err.message);
+      }
+    }
+    
+    // Also fetch general website content for other pages if user is asking general questions
+    if (!websiteContent && pageContext?.url && !pageContext.isProduct && (isFAQQuery || lowerMessage.includes("about") || lowerMessage.includes("tell me"))) {
+      try {
+        const content = await fetchWebsiteContent(pageContext.url);
+        if (content) {
+          websiteContent = `\n\nCURRENT PAGE CONTENT:\n${content.substring(0, 2000)}\n`;
+        }
+      } catch (err) {
+        // Silently fail for non-FAQ pages
       }
     }
     
@@ -5832,8 +5934,20 @@ app.post("/api/chat", async (req, res) => {
       }
     }
     
-    // 5. Build enhanced system prompt with company, product, legal, and page context
-    let systemPrompt = `You are Marom's virtual assistant helping website visitors.
+    // 5. Build conversation context from history
+    let conversationContext = "";
+    if (conversationHistory && conversationHistory.length > 0) {
+      conversationContext = "\n\nPREVIOUS CONVERSATION:\n";
+      // Use last 10 messages to keep context manageable
+      conversationHistory.slice(-10).forEach((msg, idx) => {
+        const role = msg.role === "user" ? "User" : "Assistant";
+        conversationContext += `${role}: ${msg.text}\n`;
+      });
+      conversationContext += "\nIMPORTANT: Remember the context from the previous conversation. The user may be continuing a previous topic or asking follow-up questions. Reference previous parts of the conversation when relevant.\n";
+    }
+    
+    // 6. Build enhanced system prompt with company, product, legal, page context, website content, and conversation history
+    let systemPrompt = `You are Marom's virtual assistant helping website visitors. You are friendly, conversational, and remember previous interactions.
 
 COMPANY INFORMATION:
 - Brand: ${companyContext.name || "MAROM"}
@@ -5841,7 +5955,11 @@ COMPANY INFORMATION:
 ${companyContext.brandValues ? `- Brand Values: ${companyContext.brandValues}` : ""}
 ${companyContext.targetAudience ? `- Target Audience: ${companyContext.targetAudience}` : ""}
 
+${conversationContext}
+
 ${pageInfo}
+
+${websiteContent}
 
 ${productContext}
 
@@ -5849,6 +5967,8 @@ ${legalContext}
 
 RULES:
 - You help visitors with questions about hair loss, scalp care, and Marom products.
+- Be conversational and natural - like talking to a friend who knows about hair care.
+- Reference previous parts of the conversation when relevant.
 - Marom products are natural and moringa-based.
 - Be supportive, calm, and easy to understand.
 ${currentProduct ? `- CRITICAL: The user is currently viewing the product "${currentProduct.name}" on the product page. When they ask questions like "tell me more", "is this good for...", "what's the price", "can I use this", or any product-related question, they are referring to THIS specific product. Always reference it directly.` : ''}
@@ -5856,21 +5976,23 @@ ${currentProduct ? `- CRITICAL: The user is currently viewing the product "${cur
 - When answering legal questions, use the exact information from the legal documents provided above.
 - For legal questions, be accurate and refer to the specific policy or terms document.
 - IMPORTANT: When answering legal/policy questions, always mention that the user can read the full policy document on the website. Include the policy URL in your response so users can access the complete information.
+- If the user asks about FAQ or frequently asked questions, use the FAQ content provided above.
 - Do NOT give medical advice or diagnoses. No "treat/cure/prevent" claims.
 - Do NOT talk about campaigns, ads, dashboards, internal tools, or analytics.
 - If someone asks about products, provide specific information from the product list above.
 - If asked about prices, use the exact prices from the product information.
 - If asked about legal matters (terms, privacy, refunds, returns, shipping), use the legal documents provided above.
 - If unsure, give general, gentle guidance and suggest exploring Marom products or contacting support.
-- Keep answers concise and helpful (2-3 sentences when possible, but legal questions may require more detail).`;
+- Keep answers concise and helpful (2-3 sentences when possible, but legal questions may require more detail).
+- Use natural language - avoid sounding robotic. Be warm and personable.`;
 
-    // 6. Call AI with enhanced context
+    // 7. Call AI with enhanced context
     let aiResponse = await generateAIResponse({
       system: systemPrompt,
       user: message
     });
 
-    // 7. Append policy links to response if legal query
+    // 8. Append policy links to response if legal query
     if (isLegal && policyLinks.length > 0) {
       // Add policy links to the response text so they appear as clickable buttons
       const linksText = policyLinks.map(link => link.url).join('\n');
