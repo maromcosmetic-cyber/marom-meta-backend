@@ -4860,7 +4860,7 @@ app.post("/api/company/scrape-website", async (req, res) => {
 // Scrape all website pages for knowledge base
 app.post("/api/company/scrape-all-pages", async (req, res) => {
   try {
-    const { baseUrl } = req.body;
+    const { baseUrl, customPages } = req.body;
     if (!baseUrl) {
       return res.status(400).json({ error: "Base URL is required" });
     }
@@ -4868,24 +4868,71 @@ app.post("/api/company/scrape-all-pages", async (req, res) => {
     // Normalize URL (remove trailing slash)
     const normalizedUrl = baseUrl.replace(/\/$/, '');
     
-    // List of important pages to scrape
-    const pagesToScrape = [
-      { path: '/', name: 'Homepage' },
-      { path: '/faq', name: 'FAQ' },
-      { path: '/frequently-asked-questions', name: 'FAQ' },
-      { path: '/about', name: 'About' },
-      { path: '/about-us', name: 'About' },
-      { path: '/products', name: 'Products' },
-      { path: '/shop', name: 'Shop' },
-      { path: '/contact', name: 'Contact' },
-      { path: '/help', name: 'Help' },
-      { path: '/support', name: 'Support' },
-      { path: '/shipping', name: 'Shipping' },
-      { path: '/returns', name: 'Returns' },
-      { path: '/privacy', name: 'Privacy Policy' },
-      { path: '/terms', name: 'Terms' },
-      { path: '/blog', name: 'Blog' }
-    ];
+    // Use custom pages if provided, otherwise use default list
+    let pagesToScrape = [];
+    
+    if (customPages && Array.isArray(customPages) && customPages.length > 0) {
+      // Use custom pages provided by user
+      pagesToScrape = customPages;
+      console.log(`[Knowledge Base] Using ${customPages.length} custom pages provided by user`);
+    } else {
+      // Default list of important pages to scrape
+      pagesToScrape = [
+        { path: '/', name: 'Homepage' },
+        { path: '/faq', name: 'FAQ' },
+        { path: '/frequently-asked-questions', name: 'FAQ' },
+        { path: '/about', name: 'About' },
+        { path: '/about-us', name: 'About' },
+        { path: '/products', name: 'Products' },
+        { path: '/shop', name: 'Shop' },
+        { path: '/contact', name: 'Contact' },
+        { path: '/help', name: 'Help' },
+        { path: '/support', name: 'Support' },
+        { path: '/shipping', name: 'Shipping' },
+        { path: '/returns', name: 'Returns' },
+        { path: '/privacy', name: 'Privacy Policy' },
+        { path: '/privacy-policy', name: 'Privacy Policy' },
+        { path: '/terms', name: 'Terms' },
+        { path: '/terms-conditions', name: 'Terms & Conditions' },
+        { path: '/blog', name: 'Blog' }
+      ];
+      console.log(`[Knowledge Base] Using default list of ${pagesToScrape.length} pages`);
+    }
+    
+    // Try to fetch sitemap.xml to discover additional pages
+    try {
+      const sitemapUrl = normalizedUrl + '/sitemap.xml';
+      const sitemapResponse = await axios.get(sitemapUrl, {
+        timeout: 5000,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (compatible; MaromBot/1.0)'
+        }
+      });
+      
+      if (sitemapResponse.data) {
+        const $ = cheerio.load(sitemapResponse.data, { xmlMode: true });
+        const sitemapUrls = [];
+        $('url loc').each((i, el) => {
+          const url = $(el).text().trim();
+          if (url && url.startsWith(normalizedUrl)) {
+            const path = url.replace(normalizedUrl, '') || '/';
+            // Only add if not already in pagesToScrape
+            if (!pagesToScrape.find(p => p.path === path)) {
+              const name = path === '/' ? 'Homepage' : path.replace(/^\//, '').replace(/-/g, ' ').replace(/\//g, ' - ');
+              sitemapUrls.push({ path, name });
+            }
+          }
+        });
+        
+        if (sitemapUrls.length > 0) {
+          console.log(`[Knowledge Base] Found ${sitemapUrls.length} additional pages from sitemap.xml`);
+          pagesToScrape.push(...sitemapUrls);
+        }
+      }
+    } catch (sitemapErr) {
+      console.log(`[Knowledge Base] Could not fetch sitemap.xml: ${sitemapErr.message}`);
+      // Continue without sitemap - not critical
+    }
 
     const scrapedPages = [];
     const errors = [];
@@ -4962,7 +5009,18 @@ app.post("/api/company/scrape-all-pages", async (req, res) => {
       pages: scrapedPages,
       totalPages: scrapedPages.length
     };
+    
+    // Debug: Log what we're saving
+    console.log(`[Knowledge Base] Saving ${scrapedPages.length} pages to company context`);
+    console.log(`[Knowledge Base] Pages array type:`, Array.isArray(scrapedPages) ? 'Array' : typeof scrapedPages);
+    console.log(`[Knowledge Base] First page:`, scrapedPages[0] ? { name: scrapedPages[0].name, path: scrapedPages[0].path } : 'none');
+    
     saveCompanyContext(companyContext);
+    
+    // Verify what was saved
+    const verifyContext = loadCompanyContext();
+    console.log(`[Knowledge Base] Verification - pages in context:`, verifyContext.websiteKnowledgeBase?.pages?.length || 0);
+    console.log(`[Knowledge Base] Verification - pages type:`, Array.isArray(verifyContext.websiteKnowledgeBase?.pages) ? 'Array' : typeof verifyContext.websiteKnowledgeBase?.pages);
 
     console.log(`[Knowledge Base] Completed: ${scrapedPages.length} pages scraped, ${errors.length} errors`);
 
@@ -4987,6 +5045,13 @@ app.get("/api/company/knowledge-base-status", (req, res) => {
   try {
     const companyContext = loadCompanyContext();
     const knowledgeBase = companyContext.websiteKnowledgeBase || null;
+    
+    // Debug: Log what we're returning
+    if (knowledgeBase) {
+      console.log(`[Knowledge Base] Status request - pages count:`, knowledgeBase.pages?.length || 0);
+      console.log(`[Knowledge Base] Status request - pages type:`, Array.isArray(knowledgeBase.pages) ? 'Array' : typeof knowledgeBase.pages);
+      console.log(`[Knowledge Base] Status request - totalPages:`, knowledgeBase.totalPages);
+    }
     
     res.json({
       success: true,
