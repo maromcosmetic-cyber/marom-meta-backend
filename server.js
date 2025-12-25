@@ -4772,6 +4772,147 @@ app.post("/api/company/scrape-website", async (req, res) => {
   }
 });
 
+// Scrape all website pages for knowledge base
+app.post("/api/company/scrape-all-pages", async (req, res) => {
+  try {
+    const { baseUrl } = req.body;
+    if (!baseUrl) {
+      return res.status(400).json({ error: "Base URL is required" });
+    }
+
+    // Normalize URL (remove trailing slash)
+    const normalizedUrl = baseUrl.replace(/\/$/, '');
+    
+    // List of important pages to scrape
+    const pagesToScrape = [
+      { path: '/', name: 'Homepage' },
+      { path: '/faq', name: 'FAQ' },
+      { path: '/frequently-asked-questions', name: 'FAQ' },
+      { path: '/about', name: 'About' },
+      { path: '/about-us', name: 'About' },
+      { path: '/products', name: 'Products' },
+      { path: '/shop', name: 'Shop' },
+      { path: '/contact', name: 'Contact' },
+      { path: '/help', name: 'Help' },
+      { path: '/support', name: 'Support' },
+      { path: '/shipping', name: 'Shipping' },
+      { path: '/returns', name: 'Returns' },
+      { path: '/privacy', name: 'Privacy Policy' },
+      { path: '/terms', name: 'Terms' },
+      { path: '/blog', name: 'Blog' }
+    ];
+
+    const scrapedPages = [];
+    const errors = [];
+
+    console.log(`[Knowledge Base] Starting to scrape ${pagesToScrape.length} pages from ${normalizedUrl}`);
+
+    // Scrape each page
+    for (const page of pagesToScrape) {
+      try {
+        const url = normalizedUrl + page.path;
+        console.log(`[Knowledge Base] Scraping: ${url}`);
+        
+        const content = await fetchWebsiteContent(url);
+        if (content && content.trim().length > 50) {
+          // Also get title and headings
+          try {
+            const response = await axios.get(url, {
+              timeout: 5000,
+              headers: {
+                'User-Agent': 'Mozilla/5.0 (compatible; MaromBot/1.0)'
+              }
+            });
+            const $ = cheerio.load(response.data);
+            const title = $('title').first().text().trim() || page.name;
+            const headings = [];
+            $('h1, h2').each((i, el) => {
+              const text = $(el).text().trim();
+              if (text && !headings.includes(text)) {
+                headings.push(text);
+              }
+            });
+
+            scrapedPages.push({
+              url: url,
+              path: page.path,
+              name: page.name,
+              title: title,
+              content: content,
+              headings: headings.slice(0, 10),
+              scrapedAt: new Date().toISOString()
+            });
+            console.log(`[Knowledge Base] ✓ Successfully scraped: ${page.name}`);
+          } catch (err) {
+            // If we got content but failed to get title, still save it
+            scrapedPages.push({
+              url: url,
+              path: page.path,
+              name: page.name,
+              title: page.name,
+              content: content,
+              headings: [],
+              scrapedAt: new Date().toISOString()
+            });
+            console.log(`[Knowledge Base] ✓ Scraped ${page.name} (title extraction failed)`);
+          }
+        } else {
+          errors.push({ page: page.name, error: 'No content found or content too short' });
+          console.log(`[Knowledge Base] ✗ No content for: ${page.name}`);
+        }
+      } catch (err) {
+        errors.push({ page: page.name, error: err.message });
+        console.error(`[Knowledge Base] ✗ Error scraping ${page.name}:`, err.message);
+      }
+      
+      // Small delay between requests to be respectful
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+
+    // Save to company context
+    const companyContext = loadCompanyContext();
+    companyContext.websiteKnowledgeBase = {
+      baseUrl: normalizedUrl,
+      lastUpdated: new Date().toISOString(),
+      pages: scrapedPages,
+      totalPages: scrapedPages.length
+    };
+    saveCompanyContext(companyContext);
+
+    console.log(`[Knowledge Base] Completed: ${scrapedPages.length} pages scraped, ${errors.length} errors`);
+
+    res.json({
+      success: true,
+      data: {
+        baseUrl: normalizedUrl,
+        lastUpdated: companyContext.websiteKnowledgeBase.lastUpdated,
+        pages: scrapedPages,
+        totalPages: scrapedPages.length,
+        errors: errors
+      }
+    });
+  } catch (err) {
+    console.error("[Knowledge Base] Error:", err);
+    res.status(500).json({ error: err.message || "Failed to scrape website pages" });
+  }
+});
+
+// Get knowledge base status
+app.get("/api/company/knowledge-base-status", (req, res) => {
+  try {
+    const companyContext = loadCompanyContext();
+    const knowledgeBase = companyContext.websiteKnowledgeBase || null;
+    
+    res.json({
+      success: true,
+      data: knowledgeBase
+    });
+  } catch (err) {
+    console.error("[Knowledge Base] Error getting status:", err);
+    res.status(500).json({ error: err.message || "Failed to get knowledge base status" });
+  }
+});
+
 // Get Meta ad image specifications
 app.get("/api/meta/ad-image-specs", async (req, res) => {
   try {
@@ -5659,7 +5800,7 @@ app.post("/api/chat", async (req, res) => {
       }
     }
     
-    // 2.6. Fetch FAQ/website content if on FAQ page or if user asks about FAQ
+    // 2.6. Get website content from knowledge base (stored) or live scraping (fallback)
     let websiteContent = "";
     const isFAQQuery = lowerMessage.includes("faq") || 
                        lowerMessage.includes("frequently asked") || 
@@ -5668,7 +5809,69 @@ app.post("/api/chat", async (req, res) => {
                        lowerMessage.includes("what is") ||
                        lowerMessage.includes("how do");
 
-    if (isFAQQuery || detectFAQPage(pageContext)) {
+    // First, try to use stored knowledge base
+    if (companyContext.websiteKnowledgeBase && companyContext.websiteKnowledgeBase.pages && companyContext.websiteKnowledgeBase.pages.length > 0) {
+      try {
+        const knowledgeBase = companyContext.websiteKnowledgeBase;
+        const relevantPages = [];
+        
+        // Determine which pages are relevant based on query
+        if (isFAQQuery || detectFAQPage(pageContext)) {
+          // Look for FAQ/help pages
+          relevantPages.push(...knowledgeBase.pages.filter(p => 
+            p.path.includes('faq') || 
+            p.path.includes('help') || 
+            p.path.includes('support') ||
+            p.name.toLowerCase().includes('faq')
+          ));
+        }
+        
+        // If asking about general info, include homepage and about
+        if (lowerMessage.includes("about") || lowerMessage.includes("tell me") || lowerMessage.includes("what is")) {
+          relevantPages.push(...knowledgeBase.pages.filter(p => 
+            p.path === '/' || 
+            p.path.includes('about')
+          ));
+        }
+        
+        // If on a specific page, try to find matching page in knowledge base
+        if (pageContext?.url && !relevantPages.length) {
+          const currentPath = new URL(pageContext.url).pathname;
+          const matchingPage = knowledgeBase.pages.find(p => 
+            p.path === currentPath || 
+            p.url === pageContext.url
+          );
+          if (matchingPage) {
+            relevantPages.push(matchingPage);
+          }
+        }
+        
+        // If no specific pages found but knowledge base exists, include homepage and FAQ
+        if (relevantPages.length === 0 && (isFAQQuery || lowerMessage.includes("about"))) {
+          relevantPages.push(
+            ...knowledgeBase.pages.filter(p => p.path === '/' || p.path.includes('faq')).slice(0, 2)
+          );
+        }
+        
+        // Build content from relevant pages
+        if (relevantPages.length > 0) {
+          websiteContent = "\n\nWEBSITE CONTENT (from stored knowledge base):\n";
+          relevantPages.forEach((page, idx) => {
+            websiteContent += `\n--- ${page.title || page.name} (${page.path}) ---\n`;
+            if (page.headings && page.headings.length > 0) {
+              websiteContent += `Headings: ${page.headings.join(', ')}\n`;
+            }
+            websiteContent += `Content: ${page.content.substring(0, 2000)}${page.content.length > 2000 ? '...' : ''}\n`;
+          });
+          console.log(`[Chat] Using knowledge base: ${relevantPages.length} page(s) found`);
+        }
+      } catch (err) {
+        console.error("[Chat] Error reading from knowledge base:", err.message);
+      }
+    }
+    
+    // Fallback to live scraping if knowledge base is empty or query needs current page
+    if (!websiteContent && (isFAQQuery || detectFAQPage(pageContext))) {
       try {
         const websiteBase = companyContext.website || "https://maromcosmetic.com";
         
@@ -5684,7 +5887,7 @@ app.post("/api/chat", async (req, res) => {
         for (const url of faqUrls) {
           const content = await fetchWebsiteContent(url);
           if (content) {
-            websiteContent = `\n\nFAQ/HELP CONTENT FROM WEBSITE:\n${content}\n`;
+            websiteContent = `\n\nFAQ/HELP CONTENT FROM WEBSITE (live):\n${content}\n`;
             break;
           }
         }
@@ -5693,11 +5896,11 @@ app.post("/api/chat", async (req, res) => {
         if (!websiteContent && pageContext?.url) {
           const content = await fetchWebsiteContent(pageContext.url);
           if (content) {
-            websiteContent = `\n\nCURRENT PAGE CONTENT:\n${content}\n`;
+            websiteContent = `\n\nCURRENT PAGE CONTENT (live):\n${content}\n`;
           }
         }
       } catch (err) {
-        console.error("[Chat] Error fetching website content:", err.message);
+        console.error("[Chat] Error fetching website content (live):", err.message);
       }
     }
     
@@ -5706,7 +5909,7 @@ app.post("/api/chat", async (req, res) => {
       try {
         const content = await fetchWebsiteContent(pageContext.url);
         if (content) {
-          websiteContent = `\n\nCURRENT PAGE CONTENT:\n${content.substring(0, 2000)}\n`;
+          websiteContent = `\n\nCURRENT PAGE CONTENT (live):\n${content.substring(0, 2000)}\n`;
         }
       } catch (err) {
         // Silently fail for non-FAQ pages
