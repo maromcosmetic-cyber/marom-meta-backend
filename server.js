@@ -27,6 +27,10 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// Track instance start time for hours monitoring
+const INSTANCE_START_TIME = Date.now();
+const RENDER_FREE_TIER_HOURS = 750; // Free tier limit per month
+
 // Memory storage paths
 const MEMORY_DIR = path.join(__dirname, "memory");
 const DATA_DIR = path.join(__dirname, "data");
@@ -1130,7 +1134,20 @@ app.get("/campaigns", (req, res) => {
   }
 });
 
-app.get("/health", (_,res) => res.json({ ok: true }));
+// Enhanced health check endpoint (for Render to prevent spin-down)
+app.get("/health", (req, res) => {
+  res.json({ 
+    ok: true, 
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    status: "healthy"
+  });
+});
+
+// Additional ping endpoint (some services prefer this)
+app.get("/ping", (req, res) => {
+  res.status(200).send("pong");
+});
 
 // WhatsApp webhook verification (GET)
 app.get("/webhook/whatsapp", (req, res) => {
@@ -4721,6 +4738,20 @@ app.get("/api/control/billing", async (req, res) => {
 // Control System - System Health
 app.get("/api/control/health", async (req, res) => {
   try {
+    // Calculate instance hours (approximate)
+    const instanceUptimeMs = Date.now() - INSTANCE_START_TIME;
+    const instanceUptimeHours = instanceUptimeMs / (1000 * 60 * 60);
+    const daysSinceStart = instanceUptimeMs / (1000 * 60 * 60 * 24);
+    
+    // Estimate monthly usage (if running 24/7)
+    const estimatedMonthlyHours = daysSinceStart > 0 
+      ? (instanceUptimeHours / daysSinceStart) * 30 
+      : instanceUptimeHours * 30;
+    
+    const hoursUsed = Math.min(estimatedMonthlyHours, RENDER_FREE_TIER_HOURS);
+    const hoursRemaining = Math.max(0, RENDER_FREE_TIER_HOURS - estimatedMonthlyHours);
+    const usagePercentage = (hoursUsed / RENDER_FREE_TIER_HOURS) * 100;
+    
     const health = {
       success: true,
       timestamp: new Date().toISOString(),
@@ -4736,6 +4767,18 @@ app.get("/api/control/health", async (req, res) => {
           rss: Math.round(process.memoryUsage().rss / 1024 / 1024)
         },
         cpu: process.cpuUsage()
+      },
+      render: {
+        instanceHours: {
+          used: Math.round(hoursUsed * 100) / 100,
+          remaining: Math.round(hoursRemaining * 100) / 100,
+          limit: RENDER_FREE_TIER_HOURS,
+          percentage: Math.round(usagePercentage * 100) / 100,
+          status: usagePercentage > 90 ? 'warning' : usagePercentage > 75 ? 'caution' : 'ok'
+        },
+        instanceStartTime: new Date(INSTANCE_START_TIME).toISOString(),
+        estimatedUptime: Math.round(instanceUptimeHours * 100) / 100,
+        daysSinceStart: Math.round(daysSinceStart * 100) / 100
       },
       files: {
         companyProfile: fs.existsSync(COMPANY_FILE),
@@ -8395,6 +8438,76 @@ if (!routesLoaded) {
   // Still add direct routes as backup (they won't conflict)
   console.log("✅ Route files loaded successfully");
 }
+
+// Import backup service
+let backupService = null;
+try {
+  backupService = await import('./services/backupService.js');
+  console.log("✅ Backup service loaded");
+} catch (err) {
+  console.warn("⚠️ Backup service not available:", err.message);
+}
+
+// Manual backup endpoint
+app.post("/api/backup/run", async (req, res) => {
+  try {
+    if (!backupService) {
+      return res.status(503).json({ 
+        success: false, 
+        error: "Backup service not available. Check Google Drive credentials." 
+      });
+    }
+    
+    const results = await backupService.backupAllFiles();
+    const successCount = results.filter(r => r.success).length;
+    const totalCount = results.length;
+    
+    res.json({ 
+      success: true, 
+      results,
+      summary: {
+        total: totalCount,
+        successful: successCount,
+        failed: totalCount - successCount
+      }
+    });
+  } catch (err) {
+    console.error("[Backup] Error:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Scheduled backup (runs every 6 hours)
+let lastBackupTime = 0;
+const BACKUP_INTERVAL = 6 * 60 * 60 * 1000; // 6 hours
+
+setInterval(async () => {
+  const now = Date.now();
+  if (now - lastBackupTime > BACKUP_INTERVAL && backupService) {
+    console.log("[Backup] Running scheduled backup...");
+    try {
+      const results = await backupService.backupAllFiles();
+      const successCount = results.filter(r => r.success).length;
+      console.log(`[Backup] Scheduled backup completed: ${successCount}/${results.length} files backed up`);
+      lastBackupTime = now;
+    } catch (err) {
+      console.error("[Backup] Scheduled backup failed:", err.message);
+    }
+  }
+}, 60 * 60 * 1000); // Check every hour
+
+// Run initial backup after 1 minute (to let server start)
+setTimeout(async () => {
+  if (backupService) {
+    console.log("[Backup] Running initial backup...");
+    try {
+      await backupService.backupAllFiles();
+      lastBackupTime = Date.now();
+    } catch (err) {
+      console.error("[Backup] Initial backup failed:", err.message);
+    }
+  }
+}, 60000); // 1 minute delay
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`✅ Backend on http://localhost:${PORT}`));
