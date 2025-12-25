@@ -81,10 +81,10 @@ async function importWhatsAppService() {
         const normalizedPath = whatsappPath.startsWith(".") 
           ? whatsappPath 
           : `file://${whatsappPath}`;
-        const whatsappService = await import(normalizedPath);
-        if (whatsappService.uploadWhatsAppMedia) {
+        const importedService = await import(normalizedPath);
+        if (importedService.uploadWhatsAppMedia) {
           console.log(`[WhatsApp Routes] Loaded whatsappService from: ${whatsappPath}`);
-          return whatsappService;
+          return importedService;
         }
       }
     } catch (err) {
