@@ -7593,7 +7593,11 @@ async function loadVertexRoutes() {
           break;
         } catch (e) {
           console.error(`[Route Loading] ❌ Failed to load from ${whatsappPath}:`, e.message);
-          console.error(`[Route Loading] Error stack:`, e.stack);
+          // Only show full stack in development
+          if (process.env.NODE_ENV !== 'production') {
+            console.error(`[Route Loading] Error stack:`, e.stack);
+          }
+          // Continue to next path instead of breaking
         }
       } else {
         console.log(`[Route Loading] ⚠️ WhatsApp route file not found at: ${whatsappRoutePath}`);
@@ -7612,7 +7616,7 @@ async function loadVertexRoutes() {
       console.warn("   Check that routes/whatsapp.js exists and exports router correctly");
     }
     
-    // Load image generator routes
+    // Load image generator routes (optional - not critical if missing)
     let imageGeneratorRoutes = null;
     const possibleImageGeneratorPaths = [
       "./routes/imageGenerator.js",
@@ -7620,13 +7624,20 @@ async function loadVertexRoutes() {
     ];
     
     for (const routePath of possibleImageGeneratorPaths) {
-      try {
-        const routeModule = await import(routePath);
-        imageGeneratorRoutes = routeModule.default;
-        console.log(`[Route Loading] ✅ Loaded imageGenerator.js from ${routePath}`);
-        break;
-      } catch (e) {
-        // Continue to next path
+      const routeModulePath = routePath.startsWith("./") 
+        ? path.join(__dirname, routePath.replace("./", ""))
+        : path.join(__dirname, routePath);
+      
+      if (fs.existsSync(routeModulePath)) {
+        try {
+          const routeModule = await import(routePath);
+          imageGeneratorRoutes = routeModule.default;
+          console.log(`[Route Loading] ✅ Loaded imageGenerator.js from ${routePath}`);
+          break;
+        } catch (e) {
+          console.log(`[Route Loading] ⚠️ Failed to load ${routePath}: ${e.message}`);
+          // Continue to next path
+        }
       }
     }
     
@@ -7636,7 +7647,8 @@ async function loadVertexRoutes() {
       console.log("   - POST /api/image-generator/compose");
       console.log("   - GET /api/image-generator/test");
     } else {
-      console.warn("⚠️ Image Generator routes not found");
+      // Only log as info, not warning, since it's optional
+      console.log("ℹ️  Image Generator routes not found (optional feature)");
     }
     
     console.log("✅ Vertex AI Content Creator routes loaded");
