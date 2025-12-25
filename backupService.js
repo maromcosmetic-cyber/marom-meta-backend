@@ -18,16 +18,38 @@ async function getDriveClient() {
       private_key: process.env.GOOGLE_DRIVE_PRIVATE_KEY.replace(/\\n/g, '\n'),
       project_id: process.env.GOOGLE_DRIVE_PROJECT_ID || 'marom-website'
     },
-    scopes: ['https://www.googleapis.com/auth/drive.file']
+    scopes: [
+      'https://www.googleapis.com/auth/drive.file',
+      'https://www.googleapis.com/auth/drive'
+    ]
   });
 
   const authClient = await auth.getClient();
   return google.drive({ version: 'v3', auth: authClient });
 }
 
+// Share folder/file with email
+async function shareWithEmail(drive, fileId, email) {
+  try {
+    await drive.permissions.create({
+      fileId: fileId,
+      requestBody: {
+        role: 'reader',
+        type: 'user',
+        emailAddress: email
+      }
+    });
+    console.log(`[Backup] ✅ Shared with ${email}`);
+  } catch (error) {
+    console.error(`[Backup] ⚠️ Failed to share with ${email}:`, error.message);
+    // Don't throw - sharing failure shouldn't break backup
+  }
+}
+
 // Find or create backup folder
 async function getOrCreateBackupFolder(drive) {
   const folderName = 'Marom-Backups';
+  const shareEmail = process.env.BACKUP_SHARE_EMAIL || 'maromcosmetic@gmail.com';
   
   try {
     // Search for existing folder
@@ -37,7 +59,10 @@ async function getOrCreateBackupFolder(drive) {
     });
 
     if (response.data.files.length > 0) {
-      return response.data.files[0].id;
+      const folderId = response.data.files[0].id;
+      // Ensure it's shared (in case it wasn't before)
+      await shareWithEmail(drive, folderId, shareEmail);
+      return folderId;
     }
 
     // Create folder if it doesn't exist
@@ -49,7 +74,12 @@ async function getOrCreateBackupFolder(drive) {
       fields: 'id'
     });
 
-    return folder.data.id;
+    const folderId = folder.data.id;
+    
+    // Share the folder with the email
+    await shareWithEmail(drive, folderId, shareEmail);
+    
+    return folderId;
   } catch (error) {
     console.error('[Backup] Error finding/creating folder:', error.message);
     throw error;
